@@ -334,6 +334,11 @@ class SandboxSupervisor:
             "OPENCODE_CLIENT": "serve",
         }
 
+        # Strip credential-bearing env vars — the git remote URL in .git/config
+        # already points to the proxy, so git operations still work without these.
+        for secret_var in ("GIT_URL", "GITHUB_APP_TOKEN", "GITHUB_TOKEN"):
+            env.pop(secret_var, None)
+
         # Start OpenCode server in the repo directory
         self.opencode_process = await asyncio.create_subprocess_exec(
             "opencode",
