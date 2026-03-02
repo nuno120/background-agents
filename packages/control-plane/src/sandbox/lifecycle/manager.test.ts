@@ -24,6 +24,8 @@ import {
   type RestoreResult,
   type SnapshotConfig,
   type SnapshotResult,
+  type DestroyConfig,
+  type DestroyResult,
 } from "../provider";
 import type { SandboxRow, SessionRow } from "../../session/types";
 import type { SandboxStatus } from "../../types";
@@ -200,6 +202,7 @@ function createMockProvider(
     createSandbox: (config: CreateSandboxConfig) => Promise<CreateSandboxResult>;
     restoreFromSnapshot: (config: RestoreConfig) => Promise<RestoreResult>;
     takeSnapshot: (config: SnapshotConfig) => Promise<SnapshotResult>;
+    destroySandbox: (config: DestroyConfig) => Promise<DestroyResult>;
   }> = {}
 ): SandboxProvider {
   return {
@@ -228,6 +231,11 @@ function createMockProvider(
       vi.fn(async () => ({
         success: true,
         imageId: "snapshot-img-123",
+      })),
+    destroySandbox:
+      overrides.destroySandbox ||
+      vi.fn(async () => ({
+        success: true,
       })),
   };
 }
@@ -847,6 +855,148 @@ describe("SandboxLifecycleManager", () => {
       await manager.handleAlarm();
 
       expect(provider.takeSnapshot).toHaveBeenCalled();
+    });
+  });
+
+  describe("destroySandbox", () => {
+    it("calls provider.destroySandbox with sandbox ID", async () => {
+      const sandbox = createMockSandbox({ status: "stopped" });
+      const storage = createMockStorage(createMockSession(), sandbox);
+      const destroySandbox = vi.fn(async () => ({ success: true }));
+      const provider = createMockProvider({ destroySandbox });
+
+      const manager = new SandboxLifecycleManager(
+        provider,
+        storage,
+        createMockBroadcaster(),
+        createMockWebSocketManager(),
+        createMockAlarmScheduler(),
+        createMockIdGenerator(),
+        createTestConfig()
+      );
+
+      await manager.destroySandbox();
+
+      expect(destroySandbox).toHaveBeenCalledWith({
+        sandboxId: "sandbox-testowner-testrepo-123",
+      });
+    });
+
+    it("skips when provider does not support destroySandbox", async () => {
+      const sandbox = createMockSandbox({ status: "stopped" });
+      const storage = createMockStorage(createMockSession(), sandbox);
+      const provider: SandboxProvider = {
+        name: "no-destroy",
+        capabilities: { supportsSnapshots: false, supportsRestore: false, supportsWarm: false },
+        createSandbox: vi.fn(),
+        // No destroySandbox method
+      };
+
+      const manager = new SandboxLifecycleManager(
+        provider,
+        storage,
+        createMockBroadcaster(),
+        createMockWebSocketManager(),
+        createMockAlarmScheduler(),
+        createMockIdGenerator(),
+        createTestConfig()
+      );
+
+      // Should not throw
+      await manager.destroySandbox();
+    });
+
+    it("skips when no sandbox ID available", async () => {
+      const sandbox = createMockSandbox({ modal_sandbox_id: "" });
+      const storage = createMockStorage(createMockSession(), sandbox);
+      const destroySandbox = vi.fn(async () => ({ success: true }));
+      const provider = createMockProvider({ destroySandbox });
+
+      const manager = new SandboxLifecycleManager(
+        provider,
+        storage,
+        createMockBroadcaster(),
+        createMockWebSocketManager(),
+        createMockAlarmScheduler(),
+        createMockIdGenerator(),
+        createTestConfig()
+      );
+
+      await manager.destroySandbox();
+
+      expect(destroySandbox).not.toHaveBeenCalled();
+    });
+
+    it("handles provider errors gracefully (non-fatal)", async () => {
+      const sandbox = createMockSandbox({ status: "stopped" });
+      const storage = createMockStorage(createMockSession(), sandbox);
+      const destroySandbox = vi.fn(async () => {
+        throw new Error("Network error");
+      });
+      const provider = createMockProvider({ destroySandbox });
+
+      const manager = new SandboxLifecycleManager(
+        provider,
+        storage,
+        createMockBroadcaster(),
+        createMockWebSocketManager(),
+        createMockAlarmScheduler(),
+        createMockIdGenerator(),
+        createTestConfig()
+      );
+
+      // Should not throw
+      await manager.destroySandbox();
+    });
+
+    it("handles destroy returning failure (non-fatal)", async () => {
+      const sandbox = createMockSandbox({ status: "stopped" });
+      const storage = createMockStorage(createMockSession(), sandbox);
+      const destroySandbox = vi.fn(async () => ({
+        success: false,
+        error: "Container not found",
+      }));
+      const provider = createMockProvider({ destroySandbox });
+
+      const manager = new SandboxLifecycleManager(
+        provider,
+        storage,
+        createMockBroadcaster(),
+        createMockWebSocketManager(),
+        createMockAlarmScheduler(),
+        createMockIdGenerator(),
+        createTestConfig()
+      );
+
+      // Should not throw
+      await manager.destroySandbox();
+    });
+
+    it("is called after inactivity timeout snapshot", async () => {
+      const now = Date.now();
+      const sandbox = createMockSandbox({
+        status: "ready",
+        last_heartbeat: now - 10000,
+        last_activity: now - 11 * 60 * 1000,
+      });
+      const storage = createMockStorage(createMockSession(), sandbox);
+      const destroySandbox = vi.fn(async () => ({ success: true }));
+      const provider = createMockProvider({ destroySandbox });
+
+      const manager = new SandboxLifecycleManager(
+        provider,
+        storage,
+        createMockBroadcaster(),
+        createMockWebSocketManager(false, 0),
+        createMockAlarmScheduler(),
+        createMockIdGenerator(),
+        createTestConfig()
+      );
+
+      await manager.handleAlarm();
+
+      expect(provider.takeSnapshot).toHaveBeenCalled();
+      expect(destroySandbox).toHaveBeenCalled();
     });
   });
 

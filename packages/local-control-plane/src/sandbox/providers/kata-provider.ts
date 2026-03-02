@@ -91,12 +91,24 @@ export class SandboxProviderError extends Error {
   }
 }
 
+export interface DestroyConfig {
+  sandboxId: string;
+  traceId?: string;
+  requestId?: string;
+}
+
+export interface DestroyResult {
+  success: boolean;
+  error?: string;
+}
+
 export interface SandboxProvider {
   readonly name: string;
   readonly capabilities: SandboxProviderCapabilities;
   createSandbox(config: CreateSandboxConfig): Promise<CreateSandboxResult>;
   restoreFromSnapshot?(config: RestoreConfig): Promise<RestoreResult>;
   takeSnapshot?(config: SnapshotConfig): Promise<SnapshotResult>;
+  destroySandbox?(config: DestroyConfig): Promise<DestroyResult>;
 }
 
 /**
@@ -170,8 +182,7 @@ export class KataSandboxProvider implements SandboxProvider {
           control_plane_url: config.controlPlaneUrl,
           sandbox_auth_token: config.sandboxAuthToken,
           user_env_vars: config.userEnvVars || null,
-          timeout_seconds:
-            config.timeoutSeconds ?? DEFAULT_SANDBOX_TIMEOUT_SECONDS,
+          timeout_seconds: config.timeoutSeconds ?? DEFAULT_SANDBOX_TIMEOUT_SECONDS,
         }),
       });
 
@@ -200,6 +211,42 @@ export class KataSandboxProvider implements SandboxProvider {
     } catch (error) {
       if (error instanceof SandboxProviderError) throw error;
       throw this.classifyError("Failed to restore sandbox", error);
+    }
+  }
+
+  async destroySandbox(config: DestroyConfig): Promise<DestroyResult> {
+    try {
+      const stopUrl = this.client.getStopSandboxUrl();
+      const authToken = await generateInternalToken(this.secret);
+
+      const headers: Record<string, string> = {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${authToken}`,
+      };
+
+      const response = await fetch(stopUrl, {
+        method: "POST",
+        headers,
+        body: JSON.stringify({ sandbox_id: config.sandboxId }),
+      });
+
+      if (!response.ok) {
+        const text = await response.text();
+        return { success: false, error: `Stop failed with HTTP ${response.status}: ${text}` };
+      }
+
+      const result = (await response.json()) as {
+        success: boolean;
+        error?: string;
+      };
+
+      return { success: result.success, error: result.error };
+    } catch (error) {
+      // Non-fatal: container may already be gone
+      return {
+        success: false,
+        error: `Failed to destroy sandbox: ${error instanceof Error ? error.message : String(error)}`,
+      };
     }
   }
 
@@ -247,10 +294,7 @@ export class KataSandboxProvider implements SandboxProvider {
     }
   }
 
-  private classifyError(
-    message: string,
-    error: unknown
-  ): SandboxProviderError {
+  private classifyError(message: string, error: unknown): SandboxProviderError {
     if (error instanceof Error) {
       const msg = error.message.toLowerCase();
       if (
@@ -259,11 +303,7 @@ export class KataSandboxProvider implements SandboxProvider {
         msg.includes("econnreset") ||
         msg.includes("timeout")
       ) {
-        return new SandboxProviderError(
-          `${message}: ${error.message}`,
-          "transient",
-          error
-        );
+        return new SandboxProviderError(`${message}: ${error.message}`, "transient", error);
       }
     }
     return new SandboxProviderError(

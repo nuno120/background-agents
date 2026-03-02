@@ -144,6 +144,28 @@ export interface SnapshotResult {
 }
 
 /**
+ * Configuration for destroying (stopping + removing) a sandbox container.
+ */
+export interface DestroyConfig {
+  /** The sandbox ID to destroy */
+  sandboxId: string;
+  /** Trace ID for correlation */
+  traceId?: string;
+  /** Request ID for correlation */
+  requestId?: string;
+}
+
+/**
+ * Result of destroying a sandbox container.
+ */
+export interface DestroyResult {
+  /** Whether the destroy succeeded */
+  success: boolean;
+  /** Error message if failed */
+  error?: string;
+}
+
+/**
  * Error classification for circuit breaker decisions.
  *
  * Only permanent failures should count toward the circuit breaker threshold.
@@ -291,4 +313,18 @@ export interface SandboxProvider {
    * @throws SandboxProviderError with errorType for error handling
    */
   takeSnapshot?(config: SnapshotConfig): Promise<SnapshotResult>;
+
+  /**
+   * Destroy (stop + remove) a sandbox container.
+   *
+   * Frees compute resources (memory/CPU) but does NOT delete the control plane
+   * session — events, messages, and artifacts remain queryable.
+   *
+   * Errors are non-fatal: the container may already be gone, and callers should
+   * treat failures as best-effort.
+   *
+   * @param config - Destroy configuration with sandbox ID
+   * @returns Result indicating success or failure
+   */
+  destroySandbox?(config: DestroyConfig): Promise<DestroyResult>;
 }

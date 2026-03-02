@@ -8,7 +8,7 @@ import crypto from "crypto";
 import { verifyInternalToken, VALID_MODELS, isValidModel } from "@open-inspect/shared";
 import type { SessionManager } from "./session/session-manager.js";
 import type { LocalSessionIndexStore } from "./db/session-index-local.js";
-import type { Request, Response } from "express";
+import type { Express, Request, Response } from "express";
 import { config } from "./config.js";
 
 // ── Helpers ──────────────────────────────────────────────────────────────
@@ -52,11 +52,7 @@ function isSandboxAuthRoute(path: string): boolean {
   return SANDBOX_AUTH_ROUTES.some((p) => p.test(path));
 }
 
-async function verifyAuth(
-  req: Request,
-  ctx: RouteContext,
-  path: string
-): Promise<string | null> {
+async function verifyAuth(req: Request, ctx: RouteContext, path: string): Promise<string | null> {
   if (isPublicRoute(path)) return null;
 
   // Try HMAC auth first
@@ -90,7 +86,7 @@ async function verifyAuth(
 // ── Route handler setup ──────────────────────────────────────────────────
 
 export function setupRoutes(
-  app: import("express").Express,
+  app: Express,
   sessionManager: SessionManager,
   sessionIndex: LocalSessionIndexStore,
   internalSecret: string
@@ -210,8 +206,15 @@ export function setupRoutes(
     jsonResponse(res, state);
   });
 
-  app.delete("/sessions/:id", (req, res) => {
+  app.delete("/sessions/:id", async (req, res) => {
     const sessionId = req.params.id;
+    // Destroy sandbox container before deleting index entry
+    try {
+      const instance = sessionManager.get(sessionId);
+      await instance.handleDestroyContainer();
+    } catch {
+      // Non-fatal: container may already be gone or session may not exist
+    }
     sessionIndex.delete(sessionId);
     jsonResponse(res, { status: "deleted", sessionId });
   });
@@ -233,7 +236,11 @@ export function setupRoutes(
       model: body.model,
       reasoningEffort: body.reasoningEffort,
       attachments: body.attachments,
-      callbackContext: body.callbackContext || (body.callbackUrl ? { callbackUrl: body.callbackUrl, callbackSecret: body.callbackSecret } : undefined),
+      callbackContext:
+        body.callbackContext ||
+        (body.callbackUrl
+          ? { callbackUrl: body.callbackUrl, callbackSecret: body.callbackSecret }
+          : undefined),
     });
 
     // Touch session index timestamp
@@ -249,7 +256,6 @@ export function setupRoutes(
     // for the HTTP API, we enqueue a stop through the instance.
     // We need a public stop handler — call the internal method.
     // The original DO forwards to handleStop, but we can use the same logic.
-    const sandbox = (instance as any).getSandbox?.();
     const wsManager = (instance as any).wsManager;
     const sandboxWs = wsManager?.getSandboxSocket?.();
 
@@ -409,8 +415,12 @@ export function setupRoutes(
       // Generate JWT — handle literal \n in env var and PKCS#1 key format
       const privateKey = GITHUB_APP_PRIVATE_KEY.replace(/\\n/g, "\n");
       const now = Math.floor(Date.now() / 1000);
-      const header = Buffer.from(JSON.stringify({ alg: "RS256", typ: "JWT" })).toString("base64url");
-      const payload = Buffer.from(JSON.stringify({ iat: now - 60, exp: now + 600, iss: GITHUB_APP_ID })).toString("base64url");
+      const header = Buffer.from(JSON.stringify({ alg: "RS256", typ: "JWT" })).toString(
+        "base64url"
+      );
+      const payload = Buffer.from(
+        JSON.stringify({ iat: now - 60, exp: now + 600, iss: GITHUB_APP_ID })
+      ).toString("base64url");
       const signer = crypto.createSign("RSA-SHA256");
       signer.update(`${header}.${payload}`);
       const signature = signer.sign(privateKey, "base64url");

@@ -18,6 +18,8 @@ import {
   type RestoreResult,
   type SnapshotConfig,
   type SnapshotResult,
+  type DestroyConfig,
+  type DestroyResult,
 } from "../provider";
 
 /**
@@ -151,6 +153,48 @@ export class ModalSandboxProvider implements SandboxProvider {
         throw error;
       }
       throw this.classifyError("Failed to restore sandbox from snapshot", error);
+    }
+  }
+
+  /**
+   * Destroy (stop + remove) a sandbox container.
+   * Errors are non-fatal: the container may already be gone.
+   */
+  async destroySandbox(config: DestroyConfig): Promise<DestroyResult> {
+    try {
+      const stopUrl = this.client.getStopSandboxUrl();
+      const authToken = await generateInternalToken(this.secret);
+
+      const headers: Record<string, string> = {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${authToken}`,
+      };
+      if (config.traceId) headers["x-trace-id"] = config.traceId;
+      if (config.requestId) headers["x-request-id"] = config.requestId;
+
+      const response = await fetch(stopUrl, {
+        method: "POST",
+        headers,
+        body: JSON.stringify({ sandbox_id: config.sandboxId }),
+      });
+
+      if (!response.ok) {
+        const text = await response.text();
+        return { success: false, error: `Stop failed with HTTP ${response.status}: ${text}` };
+      }
+
+      const result = (await response.json()) as {
+        success: boolean;
+        error?: string;
+      };
+
+      return { success: result.success, error: result.error };
+    } catch (error) {
+      // Non-fatal: container may already be gone
+      return {
+        success: false,
+        error: `Failed to destroy sandbox: ${error instanceof Error ? error.message : String(error)}`,
+      };
     }
   }
 

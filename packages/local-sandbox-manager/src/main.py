@@ -150,6 +150,34 @@ async def create_sandbox(
 
 
 # ---------------------------------------------------------------------------
+# POST /api/stop-sandbox
+# ---------------------------------------------------------------------------
+
+@app.post("/api/stop-sandbox")
+async def stop_sandbox(
+    request: Request,
+    authorization: str | None = Header(None),
+):
+    require_auth(authorization)
+    body = await request.json()
+
+    sandbox_id = body.get("sandbox_id")
+    if not sandbox_id:
+        raise HTTPException(status_code=400, detail="sandbox_id is required")
+
+    try:
+        await manager.stop_sandbox(sandbox_id)
+        log.info("Sandbox stopped: %s", sandbox_id)
+        return {"success": True, "data": {"sandbox_id": sandbox_id}}
+    except ContainerError as e:
+        log.error("Sandbox stop failed: %s", e)
+        return {"success": False, "error": str(e)}
+    except Exception as e:
+        log.error("Sandbox stop failed: %s", e)
+        return {"success": False, "error": str(e)}
+
+
+# ---------------------------------------------------------------------------
 # POST /api/snapshot-sandbox
 # ---------------------------------------------------------------------------
 

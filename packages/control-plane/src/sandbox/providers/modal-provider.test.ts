@@ -16,6 +16,7 @@ function createMockModalClient(
     createSandbox: (req: CreateSandboxRequest) => Promise<CreateSandboxResponse>;
     getSnapshotSandboxUrl: () => string;
     getRestoreSandboxUrl: () => string;
+    getStopSandboxUrl: () => string;
   }> = {}
 ): ModalClient {
   return {
@@ -29,6 +30,7 @@ function createMockModalClient(
     ),
     getSnapshotSandboxUrl: vi.fn(() => "https://test-snapshot.modal.run"),
     getRestoreSandboxUrl: vi.fn(() => "https://test-restore.modal.run"),
+    getStopSandboxUrl: vi.fn(() => "https://test-stop.modal.run"),
     ...overrides,
   } as unknown as ModalClient;
 }
@@ -536,6 +538,56 @@ describe("ModalSandboxProvider", () => {
       } finally {
         globalThis.fetch = originalFetch;
       }
+    });
+
+    it("destroySandbox returns success on 200", async () => {
+      const originalFetch = globalThis.fetch;
+      globalThis.fetch = vi.fn(async () => ({
+        ok: true,
+        json: async () => ({ success: true }),
+      })) as unknown as typeof fetch;
+
+      const client = createMockModalClient();
+      const provider = new ModalSandboxProvider(client, "test-secret");
+
+      const result = await provider.destroySandbox({ sandboxId: "sandbox-123" });
+      expect(result.success).toBe(true);
+
+      globalThis.fetch = originalFetch;
+    });
+
+    it("destroySandbox returns failure on HTTP error (non-fatal)", async () => {
+      const originalFetch = globalThis.fetch;
+      globalThis.fetch = vi.fn(async () => ({
+        ok: false,
+        status: 500,
+        text: async () => "Internal Server Error",
+      })) as unknown as typeof fetch;
+
+      const client = createMockModalClient();
+      const provider = new ModalSandboxProvider(client, "test-secret");
+
+      const result = await provider.destroySandbox({ sandboxId: "sandbox-123" });
+      expect(result.success).toBe(false);
+      expect(result.error).toContain("500");
+
+      globalThis.fetch = originalFetch;
+    });
+
+    it("destroySandbox returns failure on network error (non-fatal)", async () => {
+      const originalFetch = globalThis.fetch;
+      globalThis.fetch = vi.fn(async () => {
+        throw new Error("fetch failed");
+      }) as unknown as typeof fetch;
+
+      const client = createMockModalClient();
+      const provider = new ModalSandboxProvider(client, "test-secret");
+
+      const result = await provider.destroySandbox({ sandboxId: "sandbox-123" });
+      expect(result.success).toBe(false);
+      expect(result.error).toContain("fetch failed");
+
+      globalThis.fetch = originalFetch;
     });
 
     it("returns providerObjectId from restoreFromSnapshot", async () => {

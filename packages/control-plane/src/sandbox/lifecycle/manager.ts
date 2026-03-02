@@ -588,10 +588,14 @@ export class SandboxLifecycleManager {
         last_heartbeat_ms: heartbeatHealth.ageMs || 0,
         threshold_ms: this.config.heartbeat.timeoutMs,
       });
-      // Fire-and-forget snapshot so status broadcast isn't delayed
-      this.triggerSnapshot("heartbeat_timeout").catch((e) =>
-        this.log.error("Heartbeat snapshot failed", { error: e instanceof Error ? e : String(e) })
-      );
+      // Fire-and-forget snapshot, then destroy container once snapshot completes
+      this.triggerSnapshot("heartbeat_timeout")
+        .then(() => this.destroySandbox())
+        .catch((e) =>
+          this.log.error("Heartbeat snapshot/destroy failed", {
+            error: e instanceof Error ? e : String(e),
+          })
+        );
       this.storage.updateSandboxStatus("stale");
       this.broadcaster.broadcast({ type: "sandbox_status", status: "stale" });
 
@@ -628,8 +632,9 @@ export class SandboxLifecycleManager {
         this.storage.updateSandboxStatus("stopped");
         this.broadcaster.broadcast({ type: "sandbox_status", status: "stopped" });
 
-        // Take snapshot
+        // Take snapshot, then destroy container
         await this.triggerSnapshot("inactivity_timeout");
+        await this.destroySandbox();
 
         // Send shutdown command and close WebSocket
         this.wsManager.sendToSandbox({ type: "shutdown" });
@@ -660,6 +665,50 @@ export class SandboxLifecycleManager {
         this.log.debug("Scheduling next alarm", { next_check_ms: inactivityDecision.nextCheckMs });
         await this.alarmScheduler.scheduleAlarm(now + inactivityDecision.nextCheckMs);
         return;
+    }
+  }
+
+  /**
+   * Destroy (stop + remove) the sandbox container.
+   *
+   * Frees compute resources but preserves control plane session data.
+   * Errors are logged but non-fatal — the container may already be gone.
+   */
+  async destroySandbox(): Promise<void> {
+    if (!this.provider.destroySandbox) {
+      this.log.debug("Provider does not support destroySandbox");
+      return;
+    }
+
+    const sandbox = this.storage.getSandbox();
+    if (!sandbox?.modal_sandbox_id) {
+      this.log.debug("Cannot destroy: no sandbox ID");
+      return;
+    }
+
+    try {
+      const result = await this.provider.destroySandbox({
+        sandboxId: sandbox.modal_sandbox_id,
+      });
+
+      if (result.success) {
+        this.log.info("Sandbox container destroyed", {
+          event: "sandbox.destroyed",
+          sandbox_id: sandbox.modal_sandbox_id,
+        });
+      } else {
+        this.log.warn("Sandbox container destroy failed (non-fatal)", {
+          event: "sandbox.destroy_failed",
+          sandbox_id: sandbox.modal_sandbox_id,
+          error: result.error,
+        });
+      }
+    } catch (error) {
+      this.log.warn("Sandbox container destroy error (non-fatal)", {
+        event: "sandbox.destroy_error",
+        sandbox_id: sandbox.modal_sandbox_id,
+        error: error instanceof Error ? error.message : String(error),
+      });
     }
   }
 

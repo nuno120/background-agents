@@ -166,6 +166,11 @@ export class SessionDO extends DurableObject<Env> {
       path: "/internal/openai-token-refresh",
       handler: () => this.handleOpenAITokenRefresh(),
     },
+    {
+      method: "POST",
+      path: "/internal/destroy-container",
+      handler: () => this.handleDestroyContainer(),
+    },
   ];
 
   constructor(ctx: DurableObjectState, env: Env) {
@@ -1317,6 +1322,28 @@ export class SessionDO extends DurableObject<Env> {
       },
       200
     );
+  }
+
+  /**
+   * Handle destroy-container request (called from DELETE /sessions/:id).
+   * Delegates to the lifecycle manager's destroySandbox().
+   */
+  private async handleDestroyContainer(): Promise<Response> {
+    try {
+      await this.lifecycleManager.destroySandbox();
+      return new Response(JSON.stringify({ success: true }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    } catch (error) {
+      this.log.warn("Destroy container failed (non-fatal)", {
+        error: error instanceof Error ? error.message : String(error),
+      });
+      return new Response(JSON.stringify({ success: false }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
   }
 
   private openAIRefreshJsonResponse(body: unknown, status: number): Response {

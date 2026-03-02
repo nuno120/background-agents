@@ -685,17 +685,25 @@ async function handleDeleteSession(
   request: Request,
   env: Env,
   match: RegExpMatchArray,
-  _ctx: RequestContext
+  ctx: RequestContext
 ): Promise<Response> {
   const sessionId = match.groups?.id;
   if (!sessionId) return error("Session ID required");
 
+  // Destroy sandbox container before deleting (non-fatal)
+  try {
+    const doId = env.SESSION.idFromName(sessionId);
+    const stub = env.SESSION.get(doId);
+    await stub.fetch(
+      internalRequest("http://internal/internal/destroy-container", { method: "POST" }, ctx)
+    );
+  } catch {
+    // Non-fatal: container may already be gone or DO may not exist
+  }
+
   // Delete from D1 index
   const sessionStore = new SessionIndexStore(env.DB);
   await sessionStore.delete(sessionId);
-
-  // Note: Durable Object data will be garbage collected by Cloudflare
-  // when no longer referenced. We could also call a cleanup method on the DO.
 
   return json({ status: "deleted", sessionId });
 }

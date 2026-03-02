@@ -70,21 +70,20 @@ export class LocalSandboxClient {
     return `${this.baseUrl}/api/restore-sandbox`;
   }
 
-  private async getPostHeaders(
-    correlation?: CorrelationHeaders
-  ): Promise<Record<string, string>> {
+  getStopSandboxUrl(): string {
+    return `${this.baseUrl}/api/stop-sandbox`;
+  }
+
+  private async getPostHeaders(correlation?: CorrelationHeaders): Promise<Record<string, string>> {
     const token = await generateInternalToken(this.secret);
     const headers: Record<string, string> = {
       "Content-Type": "application/json",
       Authorization: `Bearer ${token}`,
     };
     if (correlation?.trace_id) headers["x-trace-id"] = correlation.trace_id;
-    if (correlation?.request_id)
-      headers["x-request-id"] = correlation.request_id;
-    if (correlation?.session_id)
-      headers["x-session-id"] = correlation.session_id;
-    if (correlation?.sandbox_id)
-      headers["x-sandbox-id"] = correlation.sandbox_id;
+    if (correlation?.request_id) headers["x-request-id"] = correlation.request_id;
+    if (correlation?.session_id) headers["x-session-id"] = correlation.session_id;
+    if (correlation?.sandbox_id) headers["x-sandbox-id"] = correlation.sandbox_id;
     return headers;
   }
 
@@ -189,9 +188,6 @@ export class LocalSandboxClient {
   }
 }
 
-export function createLocalSandboxClient(
-  secret: string,
-  baseUrl: string
-): LocalSandboxClient {
+export function createLocalSandboxClient(secret: string, baseUrl: string): LocalSandboxClient {
   return new LocalSandboxClient(secret, baseUrl);
 }

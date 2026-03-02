@@ -93,6 +93,7 @@ export class ModalClient {
   private snapshotUrl: string;
   private snapshotSandboxUrl: string;
   private restoreSandboxUrl: string;
+  private stopSandboxUrl: string;
   private secret: string;
 
   constructor(secret: string, workspace: string) {
@@ -110,6 +111,7 @@ export class ModalClient {
     this.snapshotUrl = `${baseUrl}-api-snapshot.modal.run`;
     this.snapshotSandboxUrl = `${baseUrl}-api-snapshot-sandbox.modal.run`;
     this.restoreSandboxUrl = `${baseUrl}-api-restore-sandbox.modal.run`;
+    this.stopSandboxUrl = `${baseUrl}-api-stop-sandbox.modal.run`;
   }
 
   /**
@@ -124,6 +126,13 @@ export class ModalClient {
    */
   getRestoreSandboxUrl(): string {
     return this.restoreSandboxUrl;
+  }
+
+  /**
+   * Get the URL for the stop sandbox endpoint.
+   */
+  getStopSandboxUrl(): string {
+    return this.stopSandboxUrl;
   }
 
   /**

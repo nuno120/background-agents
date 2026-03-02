@@ -17,20 +17,11 @@
 
 import crypto from "crypto";
 import type { WebSocket as WsWebSocket } from "ws";
+import { generateInternalToken } from "@open-inspect/shared";
 import type { SqlStorage } from "./sqlite-adapter.js";
 import type { LocalSandboxClient } from "../sandbox/local-client.js";
 import type { LocalSessionIndexStore } from "../db/session-index-local.js";
-import {
-  NodeWebSocketManager,
-  type ClientInfo,
-  type SessionWebSocketManager,
-} from "./websocket-manager-node.js";
-import {
-  createKataProvider,
-  SandboxProviderError,
-  type SandboxProvider,
-  type CreateSandboxConfig,
-} from "../sandbox/providers/kata-provider.js";
+import { NodeWebSocketManager, type ClientInfo } from "./websocket-manager-node.js";
 
 // We re-use the original session schema and repository since they depend only on SqlStorage.
 // They must be copied or symlinked from packages/control-plane/src/session/.
@@ -47,7 +38,7 @@ function createLog(sessionId: string) {
       console.warn(`[${sessionId}] ${msg}`, ctx ? JSON.stringify(ctx) : ""),
     error: (msg: string, ctx?: object) =>
       console.error(`[${sessionId}] ${msg}`, ctx ? JSON.stringify(ctx) : ""),
-    debug: (msg: string, ctx?: object) => {},
+    debug: (_msg: string, _ctx?: object) => {},
   };
 }
 
@@ -249,18 +240,11 @@ export class SessionInstance {
     const sandbox = this.getSandbox();
     if (!sandbox) return;
 
-    if (
-      sandbox.status === "stopped" ||
-      sandbox.status === "failed" ||
-      sandbox.status === "stale"
-    )
+    if (sandbox.status === "stopped" || sandbox.status === "failed" || sandbox.status === "stale")
       return;
 
     // Check inactivity
-    const timeoutMs = parseInt(
-      this.config.SANDBOX_INACTIVITY_TIMEOUT_MS || "600000",
-      10
-    );
+    const timeoutMs = parseInt(this.config.SANDBOX_INACTIVITY_TIMEOUT_MS || "600000", 10);
     if (sandbox.last_activity) {
       const inactiveTime = Date.now() - sandbox.last_activity;
       if (inactiveTime >= timeoutMs) {
@@ -269,17 +253,65 @@ export class SessionInstance {
         });
         this.updateSandboxStatus("stopped");
         this.broadcast({ type: "sandbox_status", status: "stopped" });
+        // Destroy the container (non-fatal)
+        await this.destroySandboxContainer();
         // Send shutdown to sandbox
-        this.wsManager.getSandboxSocket() &&
-          this.wsManager.send(this.wsManager.getSandboxSocket()!, {
-            type: "shutdown",
-          });
+        const sandboxSocket = this.wsManager.getSandboxSocket();
+        if (sandboxSocket) {
+          this.wsManager.send(sandboxSocket, { type: "shutdown" });
+        }
         return;
       }
     }
 
     // Reschedule
     this.scheduleAlarm(Date.now() + timeoutMs);
+  }
+
+  /**
+   * Destroy (stop + remove) the sandbox container via sandbox-manager.
+   * Non-fatal: logs errors but doesn't throw.
+   */
+  private async destroySandboxContainer(): Promise<void> {
+    const sandbox = this.getSandbox();
+    if (!sandbox?.modal_sandbox_id) return;
+
+    try {
+      const stopUrl = this.sandboxClient.getStopSandboxUrl();
+      const secret = this.config.MODAL_API_SECRET;
+      if (!secret) {
+        this.log.warn("Cannot destroy sandbox: no MODAL_API_SECRET configured");
+        return;
+      }
+
+      const token = await generateInternalToken(secret);
+      const response = await fetch(stopUrl, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({ sandbox_id: sandbox.modal_sandbox_id }),
+      });
+
+      if (response.ok) {
+        this.log.info("Sandbox container destroyed", {
+          sandbox_id: sandbox.modal_sandbox_id,
+        });
+      } else {
+        const text = await response.text();
+        this.log.warn("Sandbox container destroy failed (non-fatal)", {
+          sandbox_id: sandbox.modal_sandbox_id,
+          status: response.status,
+          error: text,
+        });
+      }
+    } catch (error) {
+      this.log.warn("Sandbox container destroy error (non-fatal)", {
+        sandbox_id: sandbox.modal_sandbox_id,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
   }
 
   // ── WebSocket handling ────────────────────────────────────────────────
@@ -324,10 +356,7 @@ export class SessionInstance {
 
       const now = Date.now();
       this.updateSandboxLastActivity(now);
-      const timeoutMs = parseInt(
-        this.config.SANDBOX_INACTIVITY_TIMEOUT_MS || "600000",
-        10
-      );
+      const timeoutMs = parseInt(this.config.SANDBOX_INACTIVITY_TIMEOUT_MS || "600000", 10);
       this.scheduleAlarm(now + timeoutMs);
 
       this.log.info("Sandbox WebSocket connected", { sandbox_id: sandboxId });
@@ -355,7 +384,7 @@ export class SessionInstance {
     }
   }
 
-  handleClose(ws: WsWebSocket, code: number, reason: string): void {
+  handleClose(ws: WsWebSocket, code: number, _reason: string): void {
     this.ensureInitialized();
     const { kind } = this.wsManager.classify(ws);
 
@@ -363,6 +392,12 @@ export class SessionInstance {
       const wasActive = this.wsManager.clearSandboxSocketIfMatch(ws);
       if (wasActive && (code === 1000 || code === 1001)) {
         this.updateSandboxStatus("stopped");
+        // Fire-and-forget container destruction on clean close
+        this.destroySandboxContainer().catch((e) =>
+          this.log.error("Destroy after WS close failed", {
+            error: e instanceof Error ? e.message : String(e),
+          })
+        );
       }
     } else {
       const client = this.wsManager.removeClient(ws);
@@ -437,8 +472,7 @@ export class SessionInstance {
     const clientInfo: ClientInfo = {
       participantId: participant.id,
       userId: participant.user_id,
-      name:
-        participant.github_name || participant.github_login || participant.user_id,
+      name: participant.github_name || participant.github_login || participant.user_id,
       avatar: participant.github_login
         ? `https://avatars.githubusercontent.com/${participant.github_login}`
         : undefined,
@@ -514,13 +548,12 @@ export class SessionInstance {
     for (const row of rows) {
       try {
         events.push(JSON.parse(row.data));
-      } catch {}
+      } catch {
+        /* ignore malformed JSON */
+      }
     }
 
-    const cursor =
-      rows.length > 0
-        ? { timestamp: rows[0].created_at, id: rows[0].id }
-        : null;
+    const cursor = rows.length > 0 ? { timestamp: rows[0].created_at, id: rows[0].id } : null;
 
     return { events, hasMore: rows.length >= LIMIT, cursor };
   }
@@ -558,7 +591,9 @@ export class SessionInstance {
     for (const row of rows) {
       try {
         items.push(JSON.parse(row.data));
-      } catch {}
+      } catch {
+        /* ignore malformed JSON */
+      }
     }
 
     const oldestEvent = rows.length > 0 ? rows[0] : null;
@@ -567,9 +602,7 @@ export class SessionInstance {
       type: "history_page",
       items,
       hasMore,
-      cursor: oldestEvent
-        ? { timestamp: oldestEvent.created_at, id: oldestEvent.id }
-        : null,
+      cursor: oldestEvent ? { timestamp: oldestEvent.created_at, id: oldestEvent.id } : null,
     });
   }
 
@@ -647,17 +680,13 @@ export class SessionInstance {
 
     const position = (
       this.sql
-        .exec(
-          "SELECT COUNT(*) as count FROM messages WHERE status IN ('pending', 'processing')"
-        )
+        .exec("SELECT COUNT(*) as count FROM messages WHERE status IN ('pending', 'processing')")
         .one() as any
     ).count;
     this.wsManager.send(ws, { type: "prompt_queued", messageId, position });
 
     // Touch session index
-    this.sessionIndex.touchUpdatedAt(
-      session?.session_name || session?.id || this.sessionId
-    );
+    this.sessionIndex.touchUpdatedAt(session?.session_name || session?.id || this.sessionId);
 
     // Process queue
     await this.processMessageQueue();
@@ -669,9 +698,7 @@ export class SessionInstance {
 
     // Get next pending message
     const nextMsg = this.sql
-      .exec(
-        "SELECT * FROM messages WHERE status = 'pending' ORDER BY created_at ASC LIMIT 1"
-      )
+      .exec("SELECT * FROM messages WHERE status = 'pending' ORDER BY created_at ASC LIMIT 1")
       .toArray()[0] as any;
     if (!nextMsg) return;
 
@@ -713,7 +740,9 @@ export class SessionInstance {
     if (nextMsg.attachments) {
       try {
         (command as any).attachments = JSON.parse(nextMsg.attachments);
-      } catch {}
+      } catch {
+        /* ignore malformed JSON */
+      }
     }
 
     this.wsManager.send(sandboxWs, command);
@@ -809,7 +838,10 @@ export class SessionInstance {
         // Send webhook callback if message has a callbackUrl
         if (event.messageId) {
           this.sendWebhookCallback(event.messageId, event.success ?? true).catch((err) => {
-            this.log.error("Webhook callback failed", { messageId: event.messageId, error: String(err) });
+            this.log.error("Webhook callback failed", {
+              messageId: event.messageId,
+              error: String(err),
+            });
           });
         }
 
@@ -907,18 +939,12 @@ export class SessionInstance {
     if (this.isSpawningSandbox) return;
 
     const sandbox = this.getSandbox();
-    if (
-      sandbox?.status === "spawning" ||
-      sandbox?.status === "connecting"
-    )
-      return;
+    if (sandbox?.status === "spawning" || sandbox?.status === "connecting") return;
 
     // Check for snapshot restore
     if (
       sandbox?.snapshot_image_id &&
-      (sandbox.status === "stopped" ||
-        sandbox.status === "stale" ||
-        sandbox.status === "failed")
+      (sandbox.status === "stopped" || sandbox.status === "stale" || sandbox.status === "failed")
     ) {
       await this.restoreFromSnapshot(sandbox.snapshot_image_id);
       return;
@@ -1014,26 +1040,23 @@ export class SessionInstance {
       const controlPlaneUrl = this.config.WORKER_URL || "http://localhost:8787";
 
       // Call restore endpoint
-      const response = await fetch(
-        `${this.config.SANDBOX_MANAGER_URL}/api/restore-sandbox`,
-        {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            snapshot_image_id: snapshotImageId,
-            session_config: {
-              session_id: sessionId,
-              repo_owner: session.repo_owner,
-              repo_name: session.repo_name,
-              provider: "anthropic",
-              model: session.model || "zai-coding-plan/glm-4.7",
-            },
-            sandbox_id: expectedSandboxId,
-            control_plane_url: controlPlaneUrl,
-            sandbox_auth_token: sandboxAuthToken,
-          }),
-        }
-      );
+      const response = await fetch(`${this.config.SANDBOX_MANAGER_URL}/api/restore-sandbox`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          snapshot_image_id: snapshotImageId,
+          session_config: {
+            session_id: sessionId,
+            repo_owner: session.repo_owner,
+            repo_name: session.repo_name,
+            provider: "anthropic",
+            model: session.model || "zai-coding-plan/glm-4.7",
+          },
+          sandbox_id: expectedSandboxId,
+          control_plane_url: controlPlaneUrl,
+          sandbox_auth_token: sandboxAuthToken,
+        }),
+      });
 
       const result = (await response.json()) as any;
       if (result.success) {
@@ -1070,11 +1093,7 @@ export class SessionInstance {
     const sandbox = this.getSandbox();
     if (this.wsManager.getSandboxSocket()) return;
     if (this.isSpawningSandbox) return;
-    if (
-      sandbox?.status === "spawning" ||
-      sandbox?.status === "connecting"
-    )
-      return;
+    if (sandbox?.status === "spawning" || sandbox?.status === "connecting") return;
 
     this.broadcast({ type: "sandbox_warming" });
     await this.spawnSandbox();
@@ -1223,9 +1242,7 @@ export class SessionInstance {
 
     // Find or create participant
     let participant = (
-      this.sql
-        .exec("SELECT * FROM participants WHERE user_id = ?", body.userId)
-        .toArray() as any[]
+      this.sql.exec("SELECT * FROM participants WHERE user_id = ?", body.userId).toArray() as any[]
     )[0];
 
     if (!participant) {
@@ -1365,10 +1382,7 @@ export class SessionInstance {
         messageId: e.message_id,
         createdAt: e.created_at,
       })),
-      cursor:
-        events.length > 0
-          ? events[events.length - 1].created_at.toString()
-          : undefined,
+      cursor: events.length > 0 ? events[events.length - 1].created_at.toString() : undefined,
       hasMore,
     };
   }
@@ -1408,10 +1422,7 @@ export class SessionInstance {
         startedAt: m.started_at,
         completedAt: m.completed_at,
       })),
-      cursor:
-        messages.length > 0
-          ? messages[messages.length - 1].created_at.toString()
-          : undefined,
+      cursor: messages.length > 0 ? messages[messages.length - 1].created_at.toString() : undefined,
       hasMore,
     };
   }
@@ -1449,7 +1460,7 @@ export class SessionInstance {
     };
   }
 
-  async handleArchive(body: any): Promise<any> {
+  async handleArchive(_body: any): Promise<any> {
     const session = this.getSession();
     if (!session) return { error: "Session not found" };
 
@@ -1459,15 +1470,12 @@ export class SessionInstance {
       session.id
     );
     this.broadcast({ type: "session_status", status: "archived" });
-    this.sessionIndex.updateStatus(
-      session.session_name || session.id,
-      "archived"
-    );
+    this.sessionIndex.updateStatus(session.session_name || session.id, "archived");
 
     return { status: "archived" };
   }
 
-  async handleUnarchive(body: any): Promise<any> {
+  async handleUnarchive(_body: any): Promise<any> {
     const session = this.getSession();
     if (!session) return { error: "Session not found" };
 
@@ -1477,10 +1485,7 @@ export class SessionInstance {
       session.id
     );
     this.broadcast({ type: "session_status", status: "active" });
-    this.sessionIndex.updateStatus(
-      session.session_name || session.id,
-      "active"
-    );
+    this.sessionIndex.updateStatus(session.session_name || session.id, "active");
 
     return { status: "active" };
   }
@@ -1495,6 +1500,14 @@ export class SessionInstance {
       return { valid: false, error: "Invalid token" };
     }
     return { valid: true };
+  }
+
+  /**
+   * Public API: destroy the sandbox container (called from router DELETE route).
+   */
+  async handleDestroyContainer(): Promise<{ success: boolean }> {
+    await this.destroySandboxContainer();
+    return { success: true };
   }
 
   // ── Webhook Callback ──────────────────────────────────────────────────
