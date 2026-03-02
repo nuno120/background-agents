@@ -805,6 +805,14 @@ export class SessionInstance {
             now
           );
         }
+
+        // Send webhook callback if message has a callbackUrl
+        if (event.messageId) {
+          this.sendWebhookCallback(event.messageId, event.success ?? true).catch((err) => {
+            this.log.error("Webhook callback failed", { messageId: event.messageId, error: String(err) });
+          });
+        }
+
         this.broadcast({ type: "sandbox_event", event });
         this.broadcast({ type: "processing_status", isProcessing: false });
         this.updateSandboxLastActivity(now);
@@ -1095,6 +1103,11 @@ export class SessionInstance {
       };
       this.broadcast({ type: "sandbox_event", event });
       this.broadcast({ type: "processing_status", isProcessing: false });
+
+      // Send webhook callback for stopped execution
+      this.sendWebhookCallback(processingMsg.id, false).catch((err) => {
+        this.log.error("Webhook callback failed on stop", { error: String(err) });
+      });
     }
 
     // Forward stop to sandbox
@@ -1482,5 +1495,98 @@ export class SessionInstance {
       return { valid: false, error: "Invalid token" };
     }
     return { valid: true };
+  }
+
+  // ── Webhook Callback ──────────────────────────────────────────────────
+
+  /**
+   * Send a webhook callback to a URL stored in the message's callback_context.
+   * Used by Druppie to resume paused agents after sandbox completion.
+   */
+  private async sendWebhookCallback(messageId: string, success: boolean): Promise<void> {
+    // Look up the message's callback context
+    const row = this.sql
+      .exec("SELECT callback_context FROM messages WHERE id = ?", messageId)
+      .toArray()[0] as any;
+
+    if (!row?.callback_context) return;
+
+    let context: any;
+    try {
+      context = JSON.parse(row.callback_context);
+    } catch {
+      return;
+    }
+
+    const callbackUrl = context?.callbackUrl;
+    if (!callbackUrl) return;
+
+    const callbackSecret = context?.callbackSecret || "";
+    const session = this.getSession();
+    const sessionId = session?.id || this.sessionId;
+
+    const payloadData = {
+      sessionId,
+      messageId,
+      success,
+      timestamp: Date.now(),
+    };
+
+    // Sign the payload with HMAC-SHA256 if secret is provided
+    let signature = "";
+    if (callbackSecret) {
+      signature = crypto
+        .createHmac("sha256", callbackSecret)
+        .update(JSON.stringify(payloadData))
+        .digest("hex");
+    }
+
+    // Retry up to 2 times
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try {
+        const response = await fetch(callbackUrl, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "X-Signature": signature,
+          },
+          body: JSON.stringify(payloadData),
+        });
+
+        if (response.ok) {
+          this.log.info("Webhook callback succeeded", {
+            messageId,
+            callbackUrl,
+            success,
+          });
+          return;
+        }
+
+        const responseText = await response.text();
+        this.log.error("Webhook callback failed", {
+          messageId,
+          callbackUrl,
+          status: response.status,
+          response: responseText,
+        });
+      } catch (err) {
+        this.log.error("Webhook callback attempt failed", {
+          messageId,
+          callbackUrl,
+          attempt: attempt + 1,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+
+      // Wait 1s before retry
+      if (attempt < 1) {
+        await new Promise((r) => setTimeout(r, 1000));
+      }
+    }
+
+    this.log.error("Webhook callback failed after retries", {
+      messageId,
+      callbackUrl,
+    });
   }
 }

@@ -233,7 +233,7 @@ export function setupRoutes(
       model: body.model,
       reasoningEffort: body.reasoningEffort,
       attachments: body.attachments,
-      callbackContext: body.callbackContext,
+      callbackContext: body.callbackContext || (body.callbackUrl ? { callbackUrl: body.callbackUrl, callbackSecret: body.callbackSecret } : undefined),
     });
 
     // Touch session index timestamp
