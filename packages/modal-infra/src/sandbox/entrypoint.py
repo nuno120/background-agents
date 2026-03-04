@@ -323,6 +323,25 @@ class SandboxSupervisor:
             shutil.copy(plugin_source, plugin_dir / "codex-auth-plugin.ts")
             self.log.info("openai_oauth.plugin_deployed")
 
+        # If LLM_PROXY_URL is set, override the provider's baseURL and apiKey
+        # in the OpenCode config so ALL providers route through the control plane
+        # proxy. This works for native providers like zai-coding-plan that don't
+        # honor OPENAI_BASE_URL env vars.
+        llm_proxy = os.environ.get("LLM_PROXY_URL")
+        if llm_proxy:
+            # Strip sub-provider suffix (e.g. "zai-coding-plan" -> "zai") to match
+            # the base provider name stored in the credential store.
+            proxy_provider = provider.split("-")[0]
+            proxy_base = f"{llm_proxy}/{proxy_provider}"
+            opencode_config["provider"] = {
+                provider: {
+                    "options": {
+                        "baseURL": proxy_base,
+                        "apiKey": "proxy-managed",
+                    }
+                }
+            }
+
         env = {
             **os.environ,
             "OPENCODE_CONFIG_CONTENT": json.dumps(opencode_config),
@@ -334,24 +353,11 @@ class SandboxSupervisor:
             "OPENCODE_CLIENT": "serve",
         }
 
-        # If LLM_PROXY_URL is set, route LLM calls through the control plane proxy
-        # instead of using direct API keys. The proxy injects credentials at proxy time.
-        llm_proxy = os.environ.get("LLM_PROXY_URL")
         if llm_proxy:
-            # Strip sub-provider suffix (e.g. "zai-coding-plan" -> "zai") to match
-            # the base provider name stored in the credential store.
-            proxy_provider = provider.split("-")[0]
-            proxy_base = f"{llm_proxy}/{proxy_provider}"
-            if proxy_provider == "anthropic":
-                env["ANTHROPIC_BASE_URL"] = proxy_base
-                env["ANTHROPIC_API_KEY"] = "proxy-managed"
-            else:
-                # OpenAI-compatible providers (zai, openai, deepseek, deepinfra)
-                env["OPENAI_BASE_URL"] = proxy_base
-                env["OPENAI_API_KEY"] = "proxy-managed"
-                # Clear direct keys to avoid confusion
-                env.pop("GLM_API_KEY", None)
-                env.pop("ZHIPU_API_KEY", None)
+            # Clear direct API keys from env to prevent leaking credentials
+            # into the sandbox. The proxy handles auth injection.
+            for key_var in ("ANTHROPIC_API_KEY", "OPENAI_API_KEY", "GLM_API_KEY", "ZHIPU_API_KEY"):
+                env.pop(key_var, None)
 
         # Strip credential-bearing env vars — the git remote URL in .git/config
         # already points to the proxy, so git operations still work without these.
