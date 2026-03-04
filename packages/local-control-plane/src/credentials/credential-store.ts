@@ -27,7 +27,7 @@ export interface LlmCredentials {
 
 export interface SessionCredentials {
   git?: GitCredentials;
-  llm?: LlmCredentials;
+  llm?: LlmCredentials | LlmCredentials[];
 }
 
 export interface ProxyKeys {
@@ -37,7 +37,9 @@ export interface ProxyKeys {
 
 interface StoredSession {
   sessionId: string;
-  credentials: SessionCredentials;
+  gitCredentials: GitCredentials | null;
+  /** provider name -> LlmCredentials (multi-provider support) */
+  llmCredentials: Map<string, LlmCredentials>;
   gitProxyKey: string | null;
   llmProxyKey: string | null;
 }
@@ -54,6 +56,7 @@ export class CredentialStore {
 
   /**
    * Store credentials for a session and generate proxy keys.
+   * Accepts llm as a single LlmCredentials or an array (multi-provider).
    * Returns the generated proxy keys.
    */
   store(sessionId: string, credentials: SessionCredentials): ProxyKeys {
@@ -63,13 +66,28 @@ export class CredentialStore {
     const gitProxyKey = credentials.git
       ? crypto.randomBytes(32).toString("hex")
       : null;
-    const llmProxyKey = credentials.llm
+
+    // Normalize llm into a Map<provider, LlmCredentials>
+    const llmMap = new Map<string, LlmCredentials>();
+    if (credentials.llm) {
+      const llmArray = Array.isArray(credentials.llm)
+        ? credentials.llm
+        : [credentials.llm];
+      for (const cred of llmArray) {
+        if (cred.provider && cred.apiKey) {
+          llmMap.set(cred.provider, cred);
+        }
+      }
+    }
+
+    const llmProxyKey = llmMap.size > 0
       ? crypto.randomBytes(32).toString("hex")
       : null;
 
     const stored: StoredSession = {
       sessionId,
-      credentials,
+      gitCredentials: credentials.git ?? null,
+      llmCredentials: llmMap,
       gitProxyKey,
       llmProxyKey,
     };
@@ -92,20 +110,33 @@ export class CredentialStore {
     if (!sessionId) return null;
 
     const stored = this.sessions.get(sessionId);
-    if (!stored?.credentials.git) return null;
+    if (!stored?.gitCredentials) return null;
 
-    return { ...stored.credentials.git, sessionId };
+    return { ...stored.gitCredentials, sessionId };
   }
 
-  /** Look up LLM credentials by proxy key. Returns null if key is invalid. */
-  getByLlmProxyKey(key: string): (LlmCredentials & { sessionId: string }) | null {
+  /**
+   * Look up LLM credentials by proxy key and provider.
+   * Returns null if key is invalid or provider not found.
+   */
+  getByLlmProxyKey(key: string, provider: string): (LlmCredentials & { sessionId: string }) | null {
     const sessionId = this.llmKeyIndex.get(key);
     if (!sessionId) return null;
 
     const stored = this.sessions.get(sessionId);
-    if (!stored?.credentials.llm) return null;
+    if (!stored) return null;
 
-    return { ...stored.credentials.llm, sessionId };
+    const creds = stored.llmCredentials.get(provider);
+    if (!creds) return null;
+
+    return { ...creds, sessionId };
+  }
+
+  /** Get the list of available provider names for a session. */
+  getAvailableProviders(sessionId: string): string[] {
+    const stored = this.sessions.get(sessionId);
+    if (!stored) return [];
+    return Array.from(stored.llmCredentials.keys());
   }
 
   /** Get proxy keys for a session. Returns null if session not found. */

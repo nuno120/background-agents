@@ -164,8 +164,10 @@ export function setupRoutes(
 
     // Store credentials and generate proxy keys if provided
     let proxyKeys: { gitProxyKey: string | null; llmProxyKey: string | null } | null = null;
+    let availableLlmProviders: string[] = [];
     if (credentialStore && body.credentials) {
       proxyKeys = credentialStore.store(sessionId, body.credentials);
+      availableLlmProviders = credentialStore.getAvailableProviders(sessionId);
     }
 
     const initResult = await instance.handleInit({
@@ -183,6 +185,7 @@ export function setupRoutes(
       githubTokenEncrypted: body.githubTokenEncrypted ?? null,
       gitUrl: body.gitUrl ?? null,
       proxyKeys: proxyKeys ?? undefined,
+      availableLlmProviders,
     });
 
     if (!initResult) {

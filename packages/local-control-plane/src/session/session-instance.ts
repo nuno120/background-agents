@@ -168,6 +168,7 @@ export class SessionInstance {
   private isSpawningSandbox = false;
   private gitProxyKey: string | null = null;
   private llmProxyKey: string | null = null;
+  private availableLlmProviders: string[] = [];
 
   constructor(
     private sessionId: string,
@@ -987,6 +988,9 @@ export class SessionInstance {
       if (this.llmProxyKey) {
         userEnvVars["LLM_PROXY_URL"] = `${controlPlaneUrl}/llm-proxy/${this.llmProxyKey}`;
       }
+      if (this.availableLlmProviders.length > 0) {
+        userEnvVars["AVAILABLE_LLM_PROVIDERS"] = JSON.stringify(this.availableLlmProviders);
+      }
 
       // Extract provider from model string (e.g. "zai-coding-plan/glm-4.7" -> "zai-coding-plan")
       const fullModel = session.model || "zai-coding-plan/glm-4.7";
@@ -1061,6 +1065,9 @@ export class SessionInstance {
       const userEnvVars: Record<string, string> = {};
       if (this.llmProxyKey) {
         userEnvVars["LLM_PROXY_URL"] = `${controlPlaneUrl}/llm-proxy/${this.llmProxyKey}`;
+      }
+      if (this.availableLlmProviders.length > 0) {
+        userEnvVars["AVAILABLE_LLM_PROVIDERS"] = JSON.stringify(this.availableLlmProviders);
       }
 
       // Extract provider from model string (e.g. "zai-coding-plan/glm-4.7" -> "zai-coding-plan")
@@ -1230,6 +1237,11 @@ export class SessionInstance {
     if (body.proxyKeys) {
       this.gitProxyKey = body.proxyKeys.gitProxyKey ?? null;
       this.llmProxyKey = body.proxyKeys.llmProxyKey ?? null;
+    }
+
+    // Store available LLM providers for multi-provider sandbox config
+    if (body.availableLlmProviders) {
+      this.availableLlmProviders = body.availableLlmProviders;
     }
 
     // Trigger warm sandbox

@@ -94,22 +94,15 @@ export function setupLlmProxy(app: Express, credentialStore: CredentialStore): v
     const provider = req.params.provider as string;
     const apiPath = (req.params[0] as string) || "";
 
-    // 1. Validate proxy key
-    const creds = credentialStore.getByLlmProxyKey(proxyKey);
+    // 1. Validate proxy key and look up credentials for the requested provider
+    const creds = credentialStore.getByLlmProxyKey(proxyKey, provider);
     if (!creds) {
-      console.warn("[llm-proxy] Invalid proxy key");
-      res.status(403).json({ error: "Invalid proxy key" });
+      console.warn(`[llm-proxy] Invalid proxy key or unknown provider: ${provider}`);
+      res.status(403).json({ error: "Invalid proxy key or provider" });
       return;
     }
 
-    // 2. Validate provider matches stored credentials
-    if (provider !== creds.provider) {
-      console.warn(`[llm-proxy] Provider mismatch: requested=${provider} stored=${creds.provider}`);
-      res.status(403).json({ error: "Provider mismatch" });
-      return;
-    }
-
-    // 3. Build upstream URL
+    // 2. Build upstream URL
     const baseUrl = creds.baseUrl || PROVIDER_BASE_URLS[provider] || "";
     if (!baseUrl) {
       res.status(400).json({ error: `Unknown provider: ${provider}` });

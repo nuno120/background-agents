@@ -277,7 +277,7 @@ class SandboxSupervisor:
         provider = self.session_config.get("provider", "anthropic")
         model = self.session_config.get("model", "claude-sonnet-4-6")
         opencode_config = {
-            "model": f"{provider}/{model}",
+            "model": model,
             "permission": {
                 "*": {
                     "*": "allow",
@@ -323,24 +323,34 @@ class SandboxSupervisor:
             shutil.copy(plugin_source, plugin_dir / "codex-auth-plugin.ts")
             self.log.info("openai_oauth.plugin_deployed")
 
-        # If LLM_PROXY_URL is set, override the provider's baseURL and apiKey
+        # If LLM_PROXY_URL is set, override provider baseURLs and apiKeys
         # in the OpenCode config so ALL providers route through the control plane
-        # proxy. This works for native providers like zai-coding-plan that don't
-        # honor OPENAI_BASE_URL env vars.
+        # proxy. Supports multi-provider: each provider gets its own proxy URL.
         llm_proxy = os.environ.get("LLM_PROXY_URL")
         if llm_proxy:
-            # Strip sub-provider suffix (e.g. "zai-coding-plan" -> "zai") to match
-            # the base provider name stored in the credential store.
-            proxy_provider = provider.split("-")[0]
-            proxy_base = f"{llm_proxy}/{proxy_provider}"
-            opencode_config["provider"] = {
-                provider: {
+            available_json = os.environ.get("AVAILABLE_LLM_PROVIDERS", "")
+            if available_json:
+                base_providers = json.loads(available_json)
+            else:
+                # Fallback: derive base provider from the main model's provider
+                base_providers = [provider.split("-")[0]]
+
+            provider_config = {}
+            for base_prov in base_providers:
+                proxy_base = f"{llm_proxy}/{base_prov}"
+                # Main model's provider may have a sub-name (e.g. "zai-coding-plan")
+                # Use the full name so OpenCode can resolve the model's provider
+                if provider.split("-")[0] == base_prov:
+                    oc_name = provider  # e.g. "zai-coding-plan"
+                else:
+                    oc_name = base_prov  # e.g. "anthropic"
+                provider_config[oc_name] = {
                     "options": {
                         "baseURL": proxy_base,
                         "apiKey": "proxy-managed",
                     }
                 }
-            }
+            opencode_config["provider"] = provider_config
 
         env = {
             **os.environ,
