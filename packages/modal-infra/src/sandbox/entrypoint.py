@@ -323,6 +323,32 @@ class SandboxSupervisor:
             shutil.copy(plugin_source, plugin_dir / "codex-auth-plugin.ts")
             self.log.info("openai_oauth.plugin_deployed")
 
+        # Deploy agent definition .md files into .opencode/agents/
+        agent_files_json = os.environ.get("SANDBOX_AGENT_FILES", "")
+        agent_files = json.loads(agent_files_json) if agent_files_json else {}
+        if agent_files:
+            agents_dir = opencode_dir / "agents"
+            agents_dir.mkdir(parents=True, exist_ok=True)
+            for name, content in agent_files.items():
+                (agents_dir / f"{name}.md").write_text(content)
+            self.log.info(
+                "opencode.agent_files_deployed",
+                count=len(agent_files),
+                agents=list(agent_files.keys()),
+            )
+
+        # Parse per-agent model overrides
+        agent_models_json = os.environ.get("SANDBOX_AGENT_MODELS", "")
+        agent_models = json.loads(agent_models_json) if agent_models_json else {}
+        if agent_models:
+            agents_config = {}
+            for name, agent_model in agent_models.items():
+                if agent_model != model:  # only override if different from global
+                    agents_config[name] = {"model": agent_model}
+            if agents_config:
+                opencode_config["agents"] = agents_config
+            self.log.info("opencode.agent_models_configured", overrides=agents_config)
+
         # If LLM_PROXY_URL is set, override provider baseURLs and apiKeys
         # in the OpenCode config so ALL providers route through the control plane
         # proxy. Supports multi-provider: each provider gets its own proxy URL.
@@ -334,16 +360,22 @@ class SandboxSupervisor:
                 # Fallback: derive base provider from the main model's provider
                 base_providers = [provider.split("-")[0]]
 
+            # Collect all providers needed: base providers + providers from agent models
+            all_providers = set(base_providers)
+            for agent_model in agent_models.values():
+                if "/" in agent_model:
+                    prov = agent_model.split("/")[0]
+                    # Map sub-provider names to base provider for proxy routing
+                    # e.g. "zai-coding-plan" -> base provider "zai" already in set
+                    all_providers.add(prov)
+
             provider_config = {}
-            for base_prov in base_providers:
+            for prov in all_providers:
+                # Route through proxy using the base provider name for credential lookup
+                # e.g. "zai-coding-plan" proxies via "zai" path, "deepinfra" via "deepinfra"
+                base_prov = prov.split("-")[0]
                 proxy_base = f"{llm_proxy}/{base_prov}"
-                # Main model's provider may have a sub-name (e.g. "zai-coding-plan")
-                # Use the full name so OpenCode can resolve the model's provider
-                if provider.split("-")[0] == base_prov:
-                    oc_name = provider  # e.g. "zai-coding-plan"
-                else:
-                    oc_name = base_prov  # e.g. "anthropic"
-                provider_config[oc_name] = {
+                provider_config[prov] = {
                     "options": {
                         "baseURL": proxy_base,
                         "apiKey": "proxy-managed",

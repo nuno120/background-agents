@@ -38,11 +38,7 @@ interface RouteContext {
 
 // ── Auth ─────────────────────────────────────────────────────────────────
 
-const PUBLIC_ROUTES: RegExp[] = [
-  /^\/health$/,
-  /^\/git-proxy\//,
-  /^\/llm-proxy\//,
-];
+const PUBLIC_ROUTES: RegExp[] = [/^\/health$/, /^\/git-proxy\//, /^\/llm-proxy\//];
 
 const SANDBOX_AUTH_ROUTES: RegExp[] = [
   /^\/sessions\/[^/]+\/pr$/,
@@ -186,6 +182,8 @@ export function setupRoutes(
       gitUrl: body.gitUrl ?? null,
       proxyKeys: proxyKeys ?? undefined,
       availableLlmProviders,
+      agentModels: body.agentModels ?? null,
+      agentFiles: body.agentFiles ?? null,
     });
 
     if (!initResult) {

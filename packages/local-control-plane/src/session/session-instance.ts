@@ -169,6 +169,8 @@ export class SessionInstance {
   private gitProxyKey: string | null = null;
   private llmProxyKey: string | null = null;
   private availableLlmProviders: string[] = [];
+  private agentModels: Record<string, string> | null = null;
+  private agentFiles: Record<string, string> | null = null;
 
   constructor(
     private sessionId: string,
@@ -991,6 +993,12 @@ export class SessionInstance {
       if (this.availableLlmProviders.length > 0) {
         userEnvVars["AVAILABLE_LLM_PROVIDERS"] = JSON.stringify(this.availableLlmProviders);
       }
+      if (this.agentModels) {
+        userEnvVars["SANDBOX_AGENT_MODELS"] = JSON.stringify(this.agentModels);
+      }
+      if (this.agentFiles) {
+        userEnvVars["SANDBOX_AGENT_FILES"] = JSON.stringify(this.agentFiles);
+      }
 
       // Extract provider from model string (e.g. "zai-coding-plan/glm-4.7" -> "zai-coding-plan")
       const fullModel = session.model || "zai-coding-plan/glm-4.7";
@@ -1068,6 +1076,12 @@ export class SessionInstance {
       }
       if (this.availableLlmProviders.length > 0) {
         userEnvVars["AVAILABLE_LLM_PROVIDERS"] = JSON.stringify(this.availableLlmProviders);
+      }
+      if (this.agentModels) {
+        userEnvVars["SANDBOX_AGENT_MODELS"] = JSON.stringify(this.agentModels);
+      }
+      if (this.agentFiles) {
+        userEnvVars["SANDBOX_AGENT_FILES"] = JSON.stringify(this.agentFiles);
       }
 
       // Extract provider from model string (e.g. "zai-coding-plan/glm-4.7" -> "zai-coding-plan")
@@ -1243,6 +1257,10 @@ export class SessionInstance {
     if (body.availableLlmProviders) {
       this.availableLlmProviders = body.availableLlmProviders;
     }
+
+    // Store per-agent model overrides and agent definition files
+    this.agentModels = body.agentModels ?? null;
+    this.agentFiles = body.agentFiles ?? null;
 
     // Trigger warm sandbox
     this.warmSandbox().catch(console.error);
