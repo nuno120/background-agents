@@ -24,9 +24,21 @@ const READ_TIMEOUT_MS = 300_000;
 const PROVIDER_BASE_URLS: Record<string, string> = {
   anthropic: "https://api.anthropic.com",
   openai: "https://api.openai.com",
-  zai: "https://open.bigmodel.cn/api/paas/v4",
+  zai: "https://open.bigmodel.cn/api/paas",
   deepseek: "https://api.deepseek.com",
   deepinfra: "https://api.deepinfra.com/v1/openai",
+};
+
+/**
+ * OpenCode/OpenAI SDK always prefixes paths with /v1/ (e.g. /v1/chat/completions).
+ * Some providers use a different API version path. This map rewrites the version
+ * prefix so the upstream URL is correct.
+ *   - null  = strip /v1/ entirely (provider base URL already includes full path)
+ *   - "vN"  = replace /v1/ with /vN/
+ */
+const API_VERSION_REWRITE: Record<string, string | null> = {
+  zai: "v4",       // zai uses /v4/chat/completions, not /v1/chat/completions
+  deepinfra: null,  // deepinfra base URL is .../v1/openai, paths are /chat/completions directly
 };
 
 function injectAuthHeaders(
@@ -108,7 +120,30 @@ export function setupLlmProxy(app: Express, credentialStore: CredentialStore): v
       res.status(400).json({ error: `Unknown provider: ${provider}` });
       return;
     }
-    const upstreamUrl = `${baseUrl.replace(/\/$/, "")}/${apiPath}`;
+
+    // Rewrite /v1/ prefix for providers that use a different API version path.
+    // OpenCode/OpenAI SDK always uses /v1/ but some providers need different paths.
+    let finalApiPath = apiPath;
+    const versionRewrite = API_VERSION_REWRITE[provider];
+    if (versionRewrite !== undefined && finalApiPath.startsWith("v1/")) {
+      if (versionRewrite === null) {
+        // Strip /v1/ entirely (base URL already has full path)
+        finalApiPath = finalApiPath.slice(3);
+      } else {
+        // Replace /v1/ with /vN/, but only if base URL doesn't already end with /vN
+        const baseEndsWithVersion = baseUrl.replace(/\/$/, "").endsWith(`/${versionRewrite}`);
+        if (baseEndsWithVersion) {
+          // Base already has version (e.g. .../v4), just strip /v1/
+          finalApiPath = finalApiPath.slice(3);
+        } else {
+          // Base doesn't have version, replace /v1/ with /vN/
+          finalApiPath = `${versionRewrite}/${finalApiPath.slice(3)}`;
+        }
+      }
+    }
+
+    const upstreamUrl = `${baseUrl.replace(/\/$/, "")}/${finalApiPath}`;
+    console.log(`[llm-proxy] ${req.method} ${provider}/${apiPath} → ${upstreamUrl}`);
 
     // 4. Build headers with injected auth
     const headers: Record<string, string> = {};
