@@ -351,6 +351,14 @@ class SandboxSupervisor:
                 }
             opencode_config["provider"] = provider_config
 
+        # Write config to file — OpenCode reads from config.json, not env vars.
+        # The global config path is ~/.config/opencode/config.json.
+        config_dir = Path.home() / ".config" / "opencode"
+        config_dir.mkdir(parents=True, exist_ok=True)
+        config_file = config_dir / "config.json"
+        config_file.write_text(json.dumps(opencode_config))
+        self.log.info("opencode.config_written", path=str(config_file), config=opencode_config)
+
         env = {
             **os.environ,
             "OPENCODE_CONFIG_CONTENT": json.dumps(opencode_config),
