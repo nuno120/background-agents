@@ -8,6 +8,7 @@ import crypto from "crypto";
 import { verifyInternalToken, VALID_MODELS, isValidModel } from "@open-inspect/shared";
 import type { SessionManager } from "./session/session-manager.js";
 import type { LocalSessionIndexStore } from "./db/session-index-local.js";
+import type { CredentialStore } from "./credentials/credential-store.js";
 import type { Express, Request, Response } from "express";
 import { config } from "./config.js";
 
@@ -37,7 +38,11 @@ interface RouteContext {
 
 // ── Auth ─────────────────────────────────────────────────────────────────
 
-const PUBLIC_ROUTES: RegExp[] = [/^\/health$/];
+const PUBLIC_ROUTES: RegExp[] = [
+  /^\/health$/,
+  /^\/git-proxy\//,
+  /^\/llm-proxy\//,
+];
 
 const SANDBOX_AUTH_ROUTES: RegExp[] = [
   /^\/sessions\/[^/]+\/pr$/,
@@ -89,7 +94,8 @@ export function setupRoutes(
   app: Express,
   sessionManager: SessionManager,
   sessionIndex: LocalSessionIndexStore,
-  internalSecret: string
+  internalSecret: string,
+  credentialStore?: CredentialStore
 ): void {
   // CORS middleware
   app.use((_req, res, next) => {
@@ -156,6 +162,12 @@ export function setupRoutes(
     const model = body.model || "zai-coding-plan/glm-4.7";
     const reasoningEffort = body.reasoningEffort ?? null;
 
+    // Store credentials and generate proxy keys if provided
+    let proxyKeys: { gitProxyKey: string | null; llmProxyKey: string | null } | null = null;
+    if (credentialStore && body.credentials) {
+      proxyKeys = credentialStore.store(sessionId, body.credentials);
+    }
+
     const initResult = await instance.handleInit({
       sessionName: sessionId,
       repoOwner,
@@ -170,6 +182,7 @@ export function setupRoutes(
       githubEmail: body.githubEmail,
       githubTokenEncrypted: body.githubTokenEncrypted ?? null,
       gitUrl: body.gitUrl ?? null,
+      proxyKeys: proxyKeys ?? undefined,
     });
 
     if (!initResult) {
@@ -208,6 +221,7 @@ export function setupRoutes(
 
   app.delete("/sessions/:id", async (req, res) => {
     const sessionId = req.params.id;
+    credentialStore?.destroy(sessionId);
     // Destroy sandbox container before deleting index entry
     try {
       const instance = sessionManager.get(sessionId);

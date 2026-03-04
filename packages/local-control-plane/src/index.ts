@@ -14,6 +14,9 @@ import { config } from "./config.js";
 import { SessionManager } from "./session/session-manager.js";
 import { createLocalSandboxClient } from "./sandbox/local-client.js";
 import { LocalSessionIndexStore } from "./db/session-index-local.js";
+import { CredentialStore } from "./credentials/credential-store.js";
+import { setupGitProxy } from "./proxy/git-proxy.js";
+import { setupLlmProxy } from "./proxy/llm-proxy.js";
 import { setupRoutes } from "./router.js";
 import fs from "fs";
 
@@ -38,13 +41,20 @@ const sandboxClient = createLocalSandboxClient(
 // Session manager — Map<sessionId, SessionInstance>
 const sessionManager = new SessionManager(sandboxClient, sessionIndex);
 
+// Credential store — in-memory, per-session credential storage for proxy endpoints
+const credentialStore = new CredentialStore();
+
 // ── Express app ──────────────────────────────────────────────────────────
 
 const app = express();
 app.use(express.json({ limit: "10mb" }));
 
-// Set up API routes
-setupRoutes(app, sessionManager, sessionIndex, config.INTERNAL_CALLBACK_SECRET || config.MODAL_API_SECRET);
+// Set up proxy routes BEFORE auth middleware (proxy key IS the auth)
+setupGitProxy(app, credentialStore);
+setupLlmProxy(app, credentialStore);
+
+// Set up API routes (includes auth middleware)
+setupRoutes(app, sessionManager, sessionIndex, config.INTERNAL_CALLBACK_SECRET || config.MODAL_API_SECRET, credentialStore);
 
 // ── HTTP + WebSocket server ──────────────────────────────────────────────
 

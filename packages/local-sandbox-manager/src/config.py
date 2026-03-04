@@ -23,10 +23,8 @@ GITHUB_APP_ID = get("GITHUB_APP_ID")
 GITHUB_APP_PRIVATE_KEY = get("GITHUB_APP_PRIVATE_KEY").replace("\\n", "\n")
 GITHUB_APP_INSTALLATION_ID = get("GITHUB_APP_INSTALLATION_ID")
 
-# LLM provider API keys passed into sandboxes.
-ANTHROPIC_API_KEY = get("ANTHROPIC_API_KEY")
-GLM_API_KEY = get("GLM_API_KEY")
-ZHIPU_API_KEY = get("ZHIPU_API_KEY")
+# Note: LLM API keys are no longer configured here. Sandboxes receive
+# LLM_PROXY_URL via user_env_vars and proxy through the control plane.
 
 # ── Runtime selection ─────────────────────────────────────────────────────
 # "docker" — uses Docker CLI; works on Linux, Windows, macOS.  (default)

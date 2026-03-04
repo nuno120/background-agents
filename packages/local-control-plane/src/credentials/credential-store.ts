@@ -1,0 +1,141 @@
+/**
+ * In-memory credential store for sandbox sessions.
+ *
+ * Druppie sends credentials per-session at POST /sessions time.
+ * The store generates random proxy keys, maps them to credentials,
+ * and provides lookup for the git and LLM proxy endpoints.
+ *
+ * Credentials are wiped on session delete or process restart.
+ */
+
+import crypto from "crypto";
+
+// ── Types ────────────────────────────────────────────────────────────────
+
+export interface GitCredentials {
+  provider: string; // "gitea" or "github"
+  url: string; // e.g. "http://gitea:3000"
+  username: string;
+  password: string;
+}
+
+export interface LlmCredentials {
+  provider: string; // "zai", "anthropic", "openai", "deepseek", etc.
+  apiKey: string;
+  baseUrl: string; // e.g. "https://open.bigmodel.cn/api/paas/v4"
+}
+
+export interface SessionCredentials {
+  git?: GitCredentials;
+  llm?: LlmCredentials;
+}
+
+export interface ProxyKeys {
+  gitProxyKey: string | null;
+  llmProxyKey: string | null;
+}
+
+interface StoredSession {
+  sessionId: string;
+  credentials: SessionCredentials;
+  gitProxyKey: string | null;
+  llmProxyKey: string | null;
+}
+
+// ── Credential Store ─────────────────────────────────────────────────────
+
+export class CredentialStore {
+  /** sessionId -> stored credentials + proxy keys */
+  private sessions = new Map<string, StoredSession>();
+  /** gitProxyKey -> sessionId (reverse index) */
+  private gitKeyIndex = new Map<string, string>();
+  /** llmProxyKey -> sessionId (reverse index) */
+  private llmKeyIndex = new Map<string, string>();
+
+  /**
+   * Store credentials for a session and generate proxy keys.
+   * Returns the generated proxy keys.
+   */
+  store(sessionId: string, credentials: SessionCredentials): ProxyKeys {
+    // Clean up any existing entry for this session
+    this.destroy(sessionId);
+
+    const gitProxyKey = credentials.git
+      ? crypto.randomBytes(32).toString("hex")
+      : null;
+    const llmProxyKey = credentials.llm
+      ? crypto.randomBytes(32).toString("hex")
+      : null;
+
+    const stored: StoredSession = {
+      sessionId,
+      credentials,
+      gitProxyKey,
+      llmProxyKey,
+    };
+
+    this.sessions.set(sessionId, stored);
+
+    if (gitProxyKey) {
+      this.gitKeyIndex.set(gitProxyKey, sessionId);
+    }
+    if (llmProxyKey) {
+      this.llmKeyIndex.set(llmProxyKey, sessionId);
+    }
+
+    return { gitProxyKey, llmProxyKey };
+  }
+
+  /** Look up git credentials by proxy key. Returns null if key is invalid. */
+  getByGitProxyKey(key: string): (GitCredentials & { sessionId: string }) | null {
+    const sessionId = this.gitKeyIndex.get(key);
+    if (!sessionId) return null;
+
+    const stored = this.sessions.get(sessionId);
+    if (!stored?.credentials.git) return null;
+
+    return { ...stored.credentials.git, sessionId };
+  }
+
+  /** Look up LLM credentials by proxy key. Returns null if key is invalid. */
+  getByLlmProxyKey(key: string): (LlmCredentials & { sessionId: string }) | null {
+    const sessionId = this.llmKeyIndex.get(key);
+    if (!sessionId) return null;
+
+    const stored = this.sessions.get(sessionId);
+    if (!stored?.credentials.llm) return null;
+
+    return { ...stored.credentials.llm, sessionId };
+  }
+
+  /** Get proxy keys for a session. Returns null if session not found. */
+  getProxyKeys(sessionId: string): ProxyKeys | null {
+    const stored = this.sessions.get(sessionId);
+    if (!stored) return null;
+
+    return {
+      gitProxyKey: stored.gitProxyKey,
+      llmProxyKey: stored.llmProxyKey,
+    };
+  }
+
+  /** Wipe all credentials for a session. Idempotent. */
+  destroy(sessionId: string): void {
+    const stored = this.sessions.get(sessionId);
+    if (!stored) return;
+
+    if (stored.gitProxyKey) {
+      this.gitKeyIndex.delete(stored.gitProxyKey);
+    }
+    if (stored.llmProxyKey) {
+      this.llmKeyIndex.delete(stored.llmProxyKey);
+    }
+
+    this.sessions.delete(sessionId);
+  }
+
+  /** Number of active sessions with credentials. */
+  get size(): number {
+    return this.sessions.size;
+  }
+}

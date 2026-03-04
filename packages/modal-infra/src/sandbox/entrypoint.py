@@ -334,6 +334,22 @@ class SandboxSupervisor:
             "OPENCODE_CLIENT": "serve",
         }
 
+        # If LLM_PROXY_URL is set, route LLM calls through the control plane proxy
+        # instead of using direct API keys. The proxy injects credentials at proxy time.
+        llm_proxy = os.environ.get("LLM_PROXY_URL")
+        if llm_proxy:
+            proxy_base = f"{llm_proxy}/{provider}"
+            if provider == "anthropic":
+                env["ANTHROPIC_BASE_URL"] = proxy_base
+                env["ANTHROPIC_API_KEY"] = "proxy-managed"
+            else:
+                # OpenAI-compatible providers (zai, openai, deepseek, deepinfra)
+                env["OPENAI_BASE_URL"] = proxy_base
+                env["OPENAI_API_KEY"] = "proxy-managed"
+                # Clear direct keys to avoid confusion
+                env.pop("GLM_API_KEY", None)
+                env.pop("ZHIPU_API_KEY", None)
+
         # Strip credential-bearing env vars — the git remote URL in .git/config
         # already points to the proxy, so git operations still work without these.
         for secret_var in ("GIT_URL", "GITHUB_APP_TOKEN", "GITHUB_TOKEN"):

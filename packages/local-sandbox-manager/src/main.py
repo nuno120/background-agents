@@ -101,12 +101,8 @@ async def create_sandbox(
     if git_url:
         env_vars["GIT_URL"] = git_url
 
-    if config.ANTHROPIC_API_KEY:
-        env_vars["ANTHROPIC_API_KEY"] = config.ANTHROPIC_API_KEY
-    if config.GLM_API_KEY:
-        env_vars["GLM_API_KEY"] = config.GLM_API_KEY
-    if config.ZHIPU_API_KEY:
-        env_vars["ZHIPU_API_KEY"] = config.ZHIPU_API_KEY
+    # Note: LLM API keys are no longer injected directly. Sandboxes use
+    # LLM_PROXY_URL (passed via user_env_vars) to proxy through the control plane.
 
     # Build session config JSON
     session_config = {
@@ -277,13 +273,6 @@ async def restore_sandbox(
         env_vars["GITHUB_APP_TOKEN"] = github_app_token
         env_vars["GITHUB_TOKEN"] = github_app_token
 
-    if config.ANTHROPIC_API_KEY:
-        env_vars["ANTHROPIC_API_KEY"] = config.ANTHROPIC_API_KEY
-    if config.GLM_API_KEY:
-        env_vars["GLM_API_KEY"] = config.GLM_API_KEY
-    if config.ZHIPU_API_KEY:
-        env_vars["ZHIPU_API_KEY"] = config.ZHIPU_API_KEY
-
     try:
         container_id = await manager.restore_from_snapshot(
             image_id=snapshot_image_id,
@@ -330,13 +319,6 @@ async def warm_sandbox(
         "REPO_OWNER": repo_owner,
         "REPO_NAME": repo_name,
     }
-
-    if config.ANTHROPIC_API_KEY:
-        env_vars["ANTHROPIC_API_KEY"] = config.ANTHROPIC_API_KEY
-    if config.GLM_API_KEY:
-        env_vars["GLM_API_KEY"] = config.GLM_API_KEY
-    if config.ZHIPU_API_KEY:
-        env_vars["ZHIPU_API_KEY"] = config.ZHIPU_API_KEY
 
     try:
         await manager.create_sandbox(sandbox_id=sandbox_id, env_vars=env_vars)

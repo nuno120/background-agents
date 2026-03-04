@@ -166,6 +166,8 @@ export class SessionInstance {
   private initialized = false;
   private alarmTimer: ReturnType<typeof setTimeout> | null = null;
   private isSpawningSandbox = false;
+  private gitProxyKey: string | null = null;
+  private llmProxyKey: string | null = null;
 
   constructor(
     private sessionId: string,
@@ -975,6 +977,17 @@ export class SessionInstance {
       const sessionId = session.session_name || session.id;
       const controlPlaneUrl = this.config.WORKER_URL || "http://localhost:8787";
 
+      // Build proxy URLs if credential store provided proxy keys
+      let gitUrl = session.git_url || undefined;
+      const userEnvVars: Record<string, string> = {};
+
+      if (this.gitProxyKey) {
+        gitUrl = `${controlPlaneUrl}/git-proxy/${this.gitProxyKey}/${session.repo_owner}/${session.repo_name}.git`;
+      }
+      if (this.llmProxyKey) {
+        userEnvVars["LLM_PROXY_URL"] = `${controlPlaneUrl}/llm-proxy/${this.llmProxyKey}`;
+      }
+
       const result = await this.sandboxClient.createSandbox({
         sessionId,
         sandboxId: expectedSandboxId,
@@ -984,7 +997,8 @@ export class SessionInstance {
         sandboxAuthToken,
         provider: "anthropic",
         model: session.model || "zai-coding-plan/glm-4.7",
-        gitUrl: session.git_url || undefined,
+        gitUrl,
+        userEnvVars: Object.keys(userEnvVars).length > 0 ? userEnvVars : undefined,
       });
 
       if (result.modalObjectId) {
@@ -1039,6 +1053,12 @@ export class SessionInstance {
       const sessionId = session.session_name || session.id;
       const controlPlaneUrl = this.config.WORKER_URL || "http://localhost:8787";
 
+      // Build user env vars for proxy URLs
+      const userEnvVars: Record<string, string> = {};
+      if (this.llmProxyKey) {
+        userEnvVars["LLM_PROXY_URL"] = `${controlPlaneUrl}/llm-proxy/${this.llmProxyKey}`;
+      }
+
       // Call restore endpoint
       const response = await fetch(`${this.config.SANDBOX_MANAGER_URL}/api/restore-sandbox`, {
         method: "POST",
@@ -1055,6 +1075,7 @@ export class SessionInstance {
           sandbox_id: expectedSandboxId,
           control_plane_url: controlPlaneUrl,
           sandbox_auth_token: sandboxAuthToken,
+          user_env_vars: Object.keys(userEnvVars).length > 0 ? userEnvVars : undefined,
         }),
       });
 
@@ -1196,6 +1217,12 @@ export class SessionInstance {
       "owner",
       now
     );
+
+    // Store proxy keys if provided (from credential store)
+    if (body.proxyKeys) {
+      this.gitProxyKey = body.proxyKeys.gitProxyKey ?? null;
+      this.llmProxyKey = body.proxyKeys.llmProxyKey ?? null;
+    }
 
     // Trigger warm sandbox
     this.warmSandbox().catch(console.error);
