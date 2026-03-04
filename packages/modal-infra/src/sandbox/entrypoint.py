@@ -329,9 +329,8 @@ class SandboxSupervisor:
         llm_proxy = os.environ.get("LLM_PROXY_URL")
         if llm_proxy:
             available_json = os.environ.get("AVAILABLE_LLM_PROVIDERS", "")
-            if available_json:
-                base_providers = json.loads(available_json)
-            else:
+            base_providers = json.loads(available_json) if available_json else []
+            if not base_providers:
                 # Fallback: derive base provider from the main model's provider
                 base_providers = [provider.split("-")[0]]
 
