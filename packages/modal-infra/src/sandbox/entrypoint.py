@@ -338,8 +338,11 @@ class SandboxSupervisor:
         # instead of using direct API keys. The proxy injects credentials at proxy time.
         llm_proxy = os.environ.get("LLM_PROXY_URL")
         if llm_proxy:
-            proxy_base = f"{llm_proxy}/{provider}"
-            if provider == "anthropic":
+            # Strip sub-provider suffix (e.g. "zai-coding-plan" -> "zai") to match
+            # the base provider name stored in the credential store.
+            proxy_provider = provider.split("-")[0]
+            proxy_base = f"{llm_proxy}/{proxy_provider}"
+            if proxy_provider == "anthropic":
                 env["ANTHROPIC_BASE_URL"] = proxy_base
                 env["ANTHROPIC_API_KEY"] = "proxy-managed"
             else:

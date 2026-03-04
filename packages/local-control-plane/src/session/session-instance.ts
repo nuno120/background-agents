@@ -988,6 +988,10 @@ export class SessionInstance {
         userEnvVars["LLM_PROXY_URL"] = `${controlPlaneUrl}/llm-proxy/${this.llmProxyKey}`;
       }
 
+      // Extract provider from model string (e.g. "zai-coding-plan/glm-4.7" -> "zai-coding-plan")
+      const fullModel = session.model || "zai-coding-plan/glm-4.7";
+      const modelProvider = fullModel.includes("/") ? fullModel.split("/")[0] : "anthropic";
+
       const result = await this.sandboxClient.createSandbox({
         sessionId,
         sandboxId: expectedSandboxId,
@@ -995,8 +999,8 @@ export class SessionInstance {
         repoName: session.repo_name,
         controlPlaneUrl,
         sandboxAuthToken,
-        provider: "anthropic",
-        model: session.model || "zai-coding-plan/glm-4.7",
+        provider: modelProvider,
+        model: fullModel,
         gitUrl,
         userEnvVars: Object.keys(userEnvVars).length > 0 ? userEnvVars : undefined,
       });
@@ -1059,6 +1063,10 @@ export class SessionInstance {
         userEnvVars["LLM_PROXY_URL"] = `${controlPlaneUrl}/llm-proxy/${this.llmProxyKey}`;
       }
 
+      // Extract provider from model string (e.g. "zai-coding-plan/glm-4.7" -> "zai-coding-plan")
+      const restoreModel = session.model || "zai-coding-plan/glm-4.7";
+      const restoreProvider = restoreModel.includes("/") ? restoreModel.split("/")[0] : "anthropic";
+
       // Call restore endpoint
       const response = await fetch(`${this.config.SANDBOX_MANAGER_URL}/api/restore-sandbox`, {
         method: "POST",
@@ -1069,8 +1077,8 @@ export class SessionInstance {
             session_id: sessionId,
             repo_owner: session.repo_owner,
             repo_name: session.repo_name,
-            provider: "anthropic",
-            model: session.model || "zai-coding-plan/glm-4.7",
+            provider: restoreProvider,
+            model: restoreModel,
           },
           sandbox_id: expectedSandboxId,
           control_plane_url: controlPlaneUrl,
