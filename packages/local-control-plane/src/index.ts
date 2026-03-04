@@ -47,7 +47,12 @@ const credentialStore = new CredentialStore();
 // ── Express app ──────────────────────────────────────────────────────────
 
 const app = express();
-app.use(express.json({ limit: "10mb" }));
+// JSON body parser — skip /llm-proxy/ paths (they use their own raw body parser
+// to support streaming passthrough; express.json() would consume the body stream).
+app.use((req, res, next) => {
+  if (req.path.startsWith("/llm-proxy/")) return next();
+  express.json({ limit: "10mb" })(req, res, next);
+});
 
 // Set up proxy routes BEFORE auth middleware (proxy key IS the auth)
 setupGitProxy(app, credentialStore);
