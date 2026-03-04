@@ -143,7 +143,10 @@ export function setupLlmProxy(app: Express, credentialStore: CredentialStore): v
     }
 
     const upstreamUrl = `${baseUrl.replace(/\/$/, "")}/${finalApiPath}`;
-    console.log(`[llm-proxy] ${req.method} ${provider}/${apiPath} → ${upstreamUrl}`);
+
+    // Log the request with path rewrite details for debugging
+    const rewriteInfo = finalApiPath !== apiPath ? ` (rewritten from ${apiPath})` : "";
+    console.log(`[llm-proxy] ${req.method} ${provider}/${finalApiPath}${rewriteInfo} → ${upstreamUrl}`);
 
     // 4. Build headers with injected auth
     const headers: Record<string, string> = {};
@@ -165,13 +168,14 @@ export function setupLlmProxy(app: Express, credentialStore: CredentialStore): v
 
     const body: Buffer = (req as any).rawBody || Buffer.alloc(0);
     const streaming = req.method === "POST" && body.length > 0 && isStreamingRequest(body);
+    console.log(`[llm-proxy] mode=${streaming ? "streaming" : "buffered"} bodySize=${body.length}`);
 
     if (streaming) {
       // SSE streaming: use raw http/https to pipe response without buffering
-      await handleStreamingRequest(upstreamUrl, req.method, headers, body, res);
+      await handleStreamingRequest(upstreamUrl, req.method, headers, body, res, provider);
     } else {
       // Non-streaming: use fetch, buffer and return
-      await handleBufferedRequest(upstreamUrl, req.method, headers, body, res);
+      await handleBufferedRequest(upstreamUrl, req.method, headers, body, res, provider);
     }
   });
 }
@@ -181,8 +185,10 @@ async function handleStreamingRequest(
   method: string,
   headers: Record<string, string>,
   body: Buffer,
-  res: Response
+  res: Response,
+  provider: string
 ): Promise<void> {
+  const startTime = Date.now();
   return new Promise<void>((resolve) => {
     const parsed = new URL(url);
     const transport = parsed.protocol === "https:" ? https : http;
@@ -199,7 +205,29 @@ async function handleStreamingRequest(
       timeout: CONNECT_TIMEOUT_MS,
     };
 
+    let chunkCount = 0;
+    let totalBytes = 0;
+
     const upstream = transport.request(options, (upstreamRes) => {
+      const ttfb = Date.now() - startTime;
+      console.log(`[llm-proxy] ${provider} upstream responded status=${upstreamRes.statusCode} ttfb=${ttfb}ms`);
+
+      if (upstreamRes.statusCode && upstreamRes.statusCode >= 400) {
+        // Log error response body for debugging
+        const errorChunks: Buffer[] = [];
+        upstreamRes.on("data", (chunk: Buffer) => errorChunks.push(chunk));
+        upstreamRes.on("end", () => {
+          const errorBody = Buffer.concat(errorChunks).toString().slice(0, 500);
+          console.error(`[llm-proxy] ${provider} upstream error body: ${errorBody}`);
+          res.writeHead(upstreamRes.statusCode || 502, {
+            "Content-Type": upstreamRes.headers["content-type"] || "application/json",
+          });
+          res.end(Buffer.concat(errorChunks));
+          resolve();
+        });
+        return;
+      }
+
       // Forward status and headers
       res.writeHead(upstreamRes.statusCode || 502, {
         "Content-Type": upstreamRes.headers["content-type"] || "text/event-stream",
@@ -212,23 +240,29 @@ async function handleStreamingRequest(
 
       // Pipe upstream SSE chunks directly to client
       upstreamRes.on("data", (chunk: Buffer) => {
+        chunkCount++;
+        totalBytes += chunk.length;
         res.write(chunk);
       });
 
       upstreamRes.on("end", () => {
+        const elapsed = Date.now() - startTime;
+        console.log(`[llm-proxy] ${provider} stream done chunks=${chunkCount} bytes=${totalBytes} elapsed=${elapsed}ms`);
         res.end();
         resolve();
       });
 
       upstreamRes.on("error", (err) => {
-        console.error("[llm-proxy] Upstream stream error:", err.message);
+        const elapsed = Date.now() - startTime;
+        console.error(`[llm-proxy] ${provider} upstream stream error after ${elapsed}ms: ${err.message}`);
         res.end();
         resolve();
       });
 
       // Read timeout — if no data for READ_TIMEOUT_MS, close
       upstreamRes.setTimeout(READ_TIMEOUT_MS, () => {
-        console.warn("[llm-proxy] Read timeout on streaming response");
+        const elapsed = Date.now() - startTime;
+        console.warn(`[llm-proxy] ${provider} read timeout after ${elapsed}ms chunks=${chunkCount}`);
         upstreamRes.destroy();
         res.end();
         resolve();
@@ -236,7 +270,8 @@ async function handleStreamingRequest(
     });
 
     upstream.on("timeout", () => {
-      console.warn("[llm-proxy] Connect timeout");
+      const elapsed = Date.now() - startTime;
+      console.warn(`[llm-proxy] ${provider} connect timeout after ${elapsed}ms`);
       upstream.destroy();
       if (!res.headersSent) {
         res.status(504).json({ error: "Upstream connect timeout" });
@@ -245,7 +280,8 @@ async function handleStreamingRequest(
     });
 
     upstream.on("error", (err) => {
-      console.error("[llm-proxy] Upstream request error:", err.message);
+      const elapsed = Date.now() - startTime;
+      console.error(`[llm-proxy] ${provider} request error after ${elapsed}ms: ${err.message}`);
       if (!res.headersSent) {
         res.status(502).json({ error: "Upstream error" });
       }
@@ -262,8 +298,10 @@ async function handleBufferedRequest(
   method: string,
   headers: Record<string, string>,
   body: Buffer,
-  res: Response
+  res: Response,
+  provider: string
 ): Promise<void> {
+  const startTime = Date.now();
   try {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), READ_TIMEOUT_MS);
@@ -281,6 +319,9 @@ async function handleBufferedRequest(
     const upstream = await fetch(url, fetchOptions);
     clearTimeout(timeout);
 
+    const elapsed = Date.now() - startTime;
+    console.log(`[llm-proxy] ${provider} buffered response status=${upstream.status} elapsed=${elapsed}ms`);
+
     // Forward status
     res.status(upstream.status);
 
@@ -293,10 +334,15 @@ async function handleBufferedRequest(
 
     // Send body
     const responseBody = await upstream.arrayBuffer();
+    if (upstream.status >= 400) {
+      const errorPreview = Buffer.from(responseBody).toString().slice(0, 500);
+      console.error(`[llm-proxy] ${provider} upstream error (${upstream.status}): ${errorPreview}`);
+    }
     res.send(Buffer.from(responseBody));
   } catch (error) {
+    const elapsed = Date.now() - startTime;
     const msg = error instanceof Error ? error.message : String(error);
-    console.error(`[llm-proxy] Fetch error: ${msg}`);
+    console.error(`[llm-proxy] ${provider} fetch error after ${elapsed}ms: ${msg}`);
 
     if (!res.headersSent) {
       if (msg.includes("abort")) {
