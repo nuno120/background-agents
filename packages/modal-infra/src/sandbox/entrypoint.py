@@ -346,7 +346,7 @@ class SandboxSupervisor:
                 if agent_model != model:  # only override if different from global
                     agents_config[name] = {"model": agent_model}
             if agents_config:
-                opencode_config["agents"] = agents_config
+                opencode_config["agent"] = agents_config
             self.log.info("opencode.agent_models_configured", overrides=agents_config)
 
         # If LLM_PROXY_URL is set, override provider baseURLs and apiKeys
