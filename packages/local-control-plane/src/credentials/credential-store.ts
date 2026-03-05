@@ -35,6 +35,12 @@ export interface ProxyKeys {
   llmProxyKey: string | null;
 }
 
+/** Model chain entry for proxy failover. */
+export interface ModelChainEntry {
+  provider: string;
+  model: string;
+}
+
 interface StoredSession {
   sessionId: string;
   gitCredentials: GitCredentials | null;
@@ -42,6 +48,8 @@ interface StoredSession {
   llmCredentials: Map<string, LlmCredentials>;
   gitProxyKey: string | null;
   llmProxyKey: string | null;
+  /** Model chains for proxy failover — keyed by model string */
+  modelChains: Record<string, ModelChainEntry[]> | null;
 }
 
 // ── Credential Store ─────────────────────────────────────────────────────
@@ -59,20 +67,20 @@ export class CredentialStore {
    * Accepts llm as a single LlmCredentials or an array (multi-provider).
    * Returns the generated proxy keys.
    */
-  store(sessionId: string, credentials: SessionCredentials): ProxyKeys {
+  store(
+    sessionId: string,
+    credentials: SessionCredentials,
+    modelChains?: Record<string, ModelChainEntry[]> | null
+  ): ProxyKeys {
     // Clean up any existing entry for this session
     this.destroy(sessionId);
 
-    const gitProxyKey = credentials.git
-      ? crypto.randomBytes(32).toString("hex")
-      : null;
+    const gitProxyKey = credentials.git ? crypto.randomBytes(32).toString("hex") : null;
 
     // Normalize llm into a Map<provider, LlmCredentials>
     const llmMap = new Map<string, LlmCredentials>();
     if (credentials.llm) {
-      const llmArray = Array.isArray(credentials.llm)
-        ? credentials.llm
-        : [credentials.llm];
+      const llmArray = Array.isArray(credentials.llm) ? credentials.llm : [credentials.llm];
       for (const cred of llmArray) {
         if (cred.provider && cred.apiKey) {
           llmMap.set(cred.provider, cred);
@@ -80,9 +88,7 @@ export class CredentialStore {
       }
     }
 
-    const llmProxyKey = llmMap.size > 0
-      ? crypto.randomBytes(32).toString("hex")
-      : null;
+    const llmProxyKey = llmMap.size > 0 ? crypto.randomBytes(32).toString("hex") : null;
 
     const stored: StoredSession = {
       sessionId,
@@ -90,6 +96,7 @@ export class CredentialStore {
       llmCredentials: llmMap,
       gitProxyKey,
       llmProxyKey,
+      modelChains: modelChains ?? null,
     };
 
     this.sessions.set(sessionId, stored);
@@ -163,6 +170,28 @@ export class CredentialStore {
     }
 
     this.sessions.delete(sessionId);
+  }
+
+  /** Get model chains for proxy failover by LLM proxy key. */
+  getModelChains(proxyKey: string): Record<string, ModelChainEntry[]> | null {
+    const sessionId = this.llmKeyIndex.get(proxyKey);
+    if (!sessionId) return null;
+    const stored = this.sessions.get(sessionId);
+    return stored?.modelChains ?? null;
+  }
+
+  /** Resolve sessionId from an LLM proxy key. */
+  getSessionIdByLlmProxyKey(proxyKey: string): string | null {
+    return this.llmKeyIndex.get(proxyKey) ?? null;
+  }
+
+  /** Get all available providers with credentials for a session (by proxy key). */
+  getAvailableProvidersByProxyKey(proxyKey: string): string[] {
+    const sessionId = this.llmKeyIndex.get(proxyKey);
+    if (!sessionId) return [];
+    const stored = this.sessions.get(sessionId);
+    if (!stored) return [];
+    return Array.from(stored.llmCredentials.keys());
   }
 
   /** Number of active sessions with credentials. */

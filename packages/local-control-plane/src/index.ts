@@ -7,7 +7,7 @@
 
 import http from "http";
 import express from "express";
-import { WebSocketServer, WebSocket } from "ws";
+import { WebSocketServer } from "ws";
 import path from "path";
 import Database from "better-sqlite3";
 import { config } from "./config.js";
@@ -33,10 +33,7 @@ indexDb.pragma("busy_timeout = 5000");
 const sessionIndex = new LocalSessionIndexStore(indexDb);
 
 // Sandbox client — HTTP client for the local sandbox manager
-const sandboxClient = createLocalSandboxClient(
-  config.MODAL_API_SECRET,
-  config.SANDBOX_MANAGER_URL
-);
+const sandboxClient = createLocalSandboxClient(config.MODAL_API_SECRET, config.SANDBOX_MANAGER_URL);
 
 // Session manager — Map<sessionId, SessionInstance>
 const sessionManager = new SessionManager(sandboxClient, sessionIndex);
@@ -56,10 +53,41 @@ app.use((req, res, next) => {
 
 // Set up proxy routes BEFORE auth middleware (proxy key IS the auth)
 setupGitProxy(app, credentialStore);
-setupLlmProxy(app, credentialStore);
+setupLlmProxy(app, credentialStore, {
+  onProviderUnhealthy: (sessionId, provider, errorCount) => {
+    try {
+      const instance = sessionManager.get(sessionId);
+      instance
+        .processSandboxEvent({
+          type: "provider_unhealthy",
+          provider,
+          consecutiveErrors: errorCount,
+          source: "proxy_error_counter",
+          timestamp: Date.now(),
+        })
+        .catch(console.error);
+    } catch (e) {
+      console.error(`[llm-proxy] Failed to notify session ${sessionId} of unhealthy provider:`, e);
+    }
+  },
+  onLlmResult: (sessionId, success) => {
+    try {
+      const instance = sessionManager.get(sessionId);
+      instance.updateLlmHealth(success);
+    } catch {
+      // Session may have been destroyed — ignore
+    }
+  },
+});
 
 // Set up API routes (includes auth middleware)
-setupRoutes(app, sessionManager, sessionIndex, config.INTERNAL_CALLBACK_SECRET || config.MODAL_API_SECRET, credentialStore);
+setupRoutes(
+  app,
+  sessionManager,
+  sessionIndex,
+  config.INTERNAL_CALLBACK_SECRET || config.MODAL_API_SECRET,
+  credentialStore
+);
 
 // ── HTTP + WebSocket server ──────────────────────────────────────────────
 
@@ -86,12 +114,13 @@ server.on("upgrade", (req, socket, head) => {
   const sessionId = match[1];
   const isSandbox = url.searchParams.get("type") === "sandbox";
   // Bridge sends sandbox ID as X-Sandbox-ID header; also check query params
-  const sandboxId = url.searchParams.get("sandboxId")
-    || (req.headers["x-sandbox-id"] as string)
-    || undefined;
+  const sandboxId =
+    url.searchParams.get("sandboxId") || (req.headers["x-sandbox-id"] as string) || undefined;
   const authHeader = req.headers.authorization;
 
-  console.log(`[ws] Upgrade request: session=${sessionId} sandbox=${isSandbox} sandboxId=${sandboxId || "none"}`);
+  console.log(
+    `[ws] Upgrade request: session=${sessionId} sandbox=${isSandbox} sandboxId=${sandboxId || "none"}`
+  );
 
   wss.handleUpgrade(req, socket, head, (ws) => {
     const instance = sessionManager.get(sessionId);

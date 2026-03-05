@@ -9,6 +9,11 @@
  * Provider auth injection:
  * - Anthropic: x-api-key header + anthropic-version
  * - OpenAI-compatible (zai, openai, deepseek, deepinfra): Authorization: Bearer
+ *
+ * Resilience features:
+ * - Per-session error tracking (C1) — consecutive 5xx trigger provider_unhealthy
+ * - LLM result callbacks (C3) — feed session-level health tracking
+ * - Transparent failover (A) — on 5xx, try next provider in model chain
  */
 
 import http from "node:http";
@@ -19,6 +24,8 @@ import type { CredentialStore, LlmCredentials } from "../credentials/credential-
 const MAX_BODY_SIZE = 10 * 1024 * 1024; // 10 MB
 const CONNECT_TIMEOUT_MS = 30_000;
 const READ_TIMEOUT_MS = 300_000;
+
+const CONSECUTIVE_ERROR_THRESHOLD = 3;
 
 /** Map of provider names to their base URLs (fallbacks if not stored). */
 const PROVIDER_BASE_URLS: Record<string, string> = {
@@ -37,9 +44,31 @@ const PROVIDER_BASE_URLS: Record<string, string> = {
  *   - "vN"  = replace /v1/ with /vN/
  */
 const API_VERSION_REWRITE: Record<string, string | null> = {
-  zai: "v4",       // zai uses /v4/chat/completions, not /v1/chat/completions
-  deepinfra: null,  // deepinfra base URL is .../v1/openai, paths are /chat/completions directly
+  zai: "v4", // zai uses /v4/chat/completions, not /v1/chat/completions
+  deepinfra: null, // deepinfra base URL is .../v1/openai, paths are /chat/completions directly
 };
+
+// ── Error tracking (C1) ─────────────────────────────────────────────────
+
+/**
+ * Per-session error tracking for provider health detection.
+ * Key: proxyKey, Value: Map<provider, consecutiveErrorCount>
+ */
+const sessionErrors = new Map<string, Map<string, number>>();
+
+/** Clean up error tracking when session is destroyed. */
+export function clearSessionErrors(proxyKey: string): void {
+  sessionErrors.delete(proxyKey);
+}
+
+// ── Callbacks type ──────────────────────────────────────────────────────
+
+export interface LlmProxyCallbacks {
+  onProviderUnhealthy?: (sessionId: string, provider: string, errorCount: number) => void;
+  onLlmResult?: (sessionId: string, success: boolean) => void;
+}
+
+// ── Helpers ─────────────────────────────────────────────────────────────
 
 function injectAuthHeaders(
   headers: Record<string, string>,
@@ -66,7 +95,436 @@ function isStreamingRequest(body: Buffer): boolean {
   }
 }
 
-export function setupLlmProxy(app: Express, credentialStore: CredentialStore): void {
+function rewriteApiPath(apiPath: string, provider: string, baseUrl: string): string {
+  let finalPath = apiPath;
+  const versionRewrite = API_VERSION_REWRITE[provider];
+  if (versionRewrite !== undefined && finalPath.startsWith("v1/")) {
+    if (versionRewrite === null) {
+      finalPath = finalPath.slice(3);
+    } else {
+      const baseEndsWithVersion = baseUrl.replace(/\/$/, "").endsWith(`/${versionRewrite}`);
+      if (baseEndsWithVersion) {
+        finalPath = finalPath.slice(3);
+      } else {
+        finalPath = `${versionRewrite}/${finalPath.slice(3)}`;
+      }
+    }
+  }
+  return finalPath;
+}
+
+function extractModelFromBody(body: Buffer): string | null {
+  try {
+    const parsed = JSON.parse(body.toString());
+    return parsed.model || null;
+  } catch {
+    return null;
+  }
+}
+
+function rewriteModelInBody(body: Buffer, newModel: string): Buffer {
+  try {
+    const parsed = JSON.parse(body.toString());
+    parsed.model = newModel;
+    return Buffer.from(JSON.stringify(parsed));
+  } catch {
+    return body;
+  }
+}
+
+function trackLlmResult(
+  proxyKey: string,
+  provider: string,
+  success: boolean,
+  credentialStore: CredentialStore,
+  callbacks?: LlmProxyCallbacks
+): void {
+  // C1: Track consecutive errors
+  if (!sessionErrors.has(proxyKey)) {
+    sessionErrors.set(proxyKey, new Map());
+  }
+  const counts = sessionErrors.get(proxyKey)!;
+
+  if (success) {
+    counts.set(provider, 0);
+  } else {
+    const errorCount = (counts.get(provider) || 0) + 1;
+    counts.set(provider, errorCount);
+
+    if (errorCount >= CONSECUTIVE_ERROR_THRESHOLD) {
+      console.warn(
+        `[llm-proxy] Provider ${provider} has ${errorCount} consecutive errors for proxy key ${proxyKey.slice(0, 8)}...`
+      );
+      const sessionId = credentialStore.getSessionIdByLlmProxyKey(proxyKey);
+      if (sessionId && callbacks?.onProviderUnhealthy) {
+        callbacks.onProviderUnhealthy(sessionId, provider, errorCount);
+      }
+      counts.set(provider, 0); // Reset to avoid repeated notifications
+    }
+  }
+
+  // C3: Report every result for session-level health tracking
+  if (callbacks?.onLlmResult) {
+    const sessionId = credentialStore.getSessionIdByLlmProxyKey(proxyKey);
+    if (sessionId) {
+      callbacks.onLlmResult(sessionId, success);
+    }
+  }
+}
+
+// ── Streaming with failover support ─────────────────────────────────────
+
+type StreamResult = "success" | "headers_sent" | "failed_before_headers";
+
+async function attemptStreamingRequest(
+  url: string,
+  method: string,
+  headers: Record<string, string>,
+  body: Buffer,
+  res: Response,
+  provider: string
+): Promise<StreamResult> {
+  const startTime = Date.now();
+  return new Promise<StreamResult>((resolve) => {
+    const parsed = new URL(url);
+    const transport = parsed.protocol === "https:" ? https : http;
+
+    const options: http.RequestOptions = {
+      hostname: parsed.hostname,
+      port: parsed.port || (parsed.protocol === "https:" ? 443 : 80),
+      path: parsed.pathname + parsed.search,
+      method,
+      headers: {
+        ...headers,
+        "Content-Length": Buffer.byteLength(body).toString(),
+      },
+      timeout: CONNECT_TIMEOUT_MS,
+    };
+
+    let chunkCount = 0;
+    let totalBytes = 0;
+
+    const upstream = transport.request(options, (upstreamRes) => {
+      const ttfb = Date.now() - startTime;
+      console.log(
+        `[llm-proxy] ${provider} upstream responded status=${upstreamRes.statusCode} ttfb=${ttfb}ms`
+      );
+
+      if (upstreamRes.statusCode && upstreamRes.statusCode >= 500) {
+        // 5xx BEFORE headers sent — can retry with failover
+        upstreamRes.resume();
+        upstreamRes.on("end", () => resolve("failed_before_headers"));
+        return;
+      }
+
+      if (upstreamRes.statusCode && upstreamRes.statusCode >= 400) {
+        // 4xx — forward error, no retry
+        const errorChunks: Buffer[] = [];
+        upstreamRes.on("data", (chunk: Buffer) => errorChunks.push(chunk));
+        upstreamRes.on("end", () => {
+          const errorBody = Buffer.concat(errorChunks).toString().slice(0, 500);
+          console.error(`[llm-proxy] ${provider} upstream error body: ${errorBody}`);
+          res.writeHead(upstreamRes.statusCode || 502, {
+            "Content-Type": upstreamRes.headers["content-type"] || "application/json",
+          });
+          res.end(Buffer.concat(errorChunks));
+          resolve("success"); // Not a server error, don't retry
+        });
+        return;
+      }
+
+      // Success — forward response (can't retry after this)
+      res.writeHead(upstreamRes.statusCode || 200, {
+        "Content-Type": upstreamRes.headers["content-type"] || "text/event-stream",
+        "Cache-Control": "no-cache",
+        Connection: "keep-alive",
+        ...(upstreamRes.headers["x-request-id"]
+          ? { "x-request-id": upstreamRes.headers["x-request-id"] }
+          : {}),
+      });
+
+      upstreamRes.on("data", (chunk: Buffer) => {
+        chunkCount++;
+        totalBytes += chunk.length;
+        res.write(chunk);
+      });
+
+      upstreamRes.on("end", () => {
+        const elapsed = Date.now() - startTime;
+        console.log(
+          `[llm-proxy] ${provider} stream done chunks=${chunkCount} bytes=${totalBytes} elapsed=${elapsed}ms`
+        );
+        res.end();
+        resolve("success");
+      });
+
+      upstreamRes.on("error", (err) => {
+        const elapsed = Date.now() - startTime;
+        console.error(
+          `[llm-proxy] ${provider} upstream stream error after ${elapsed}ms: ${err.message}`
+        );
+        res.end();
+        resolve("headers_sent");
+      });
+
+      // Read timeout
+      upstreamRes.setTimeout(READ_TIMEOUT_MS, () => {
+        const elapsed = Date.now() - startTime;
+        console.warn(
+          `[llm-proxy] ${provider} read timeout after ${elapsed}ms chunks=${chunkCount}`
+        );
+        upstreamRes.destroy();
+        res.end();
+        resolve("headers_sent");
+      });
+    });
+
+    upstream.on("timeout", () => {
+      const elapsed = Date.now() - startTime;
+      console.warn(`[llm-proxy] ${provider} connect timeout after ${elapsed}ms`);
+      upstream.destroy();
+      resolve("failed_before_headers");
+    });
+
+    upstream.on("error", (err) => {
+      const elapsed = Date.now() - startTime;
+      console.error(`[llm-proxy] ${provider} request error after ${elapsed}ms: ${err.message}`);
+      resolve("failed_before_headers");
+    });
+
+    upstream.write(body);
+    upstream.end();
+  });
+}
+
+// ── Buffered request with failover support ──────────────────────────────
+
+interface BufferedResult {
+  status: number;
+  contentType: string | null;
+  body: Buffer;
+}
+
+async function attemptBufferedRequest(
+  url: string,
+  method: string,
+  headers: Record<string, string>,
+  body: Buffer,
+  provider: string
+): Promise<BufferedResult> {
+  const startTime = Date.now();
+  try {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), READ_TIMEOUT_MS);
+
+    const fetchOptions: RequestInit = {
+      method,
+      headers,
+      signal: controller.signal,
+    };
+
+    if (method !== "GET" && method !== "HEAD" && body.length > 0) {
+      fetchOptions.body = body;
+    }
+
+    const upstream = await fetch(url, fetchOptions);
+    clearTimeout(timeout);
+
+    const elapsed = Date.now() - startTime;
+    console.log(
+      `[llm-proxy] ${provider} buffered response status=${upstream.status} elapsed=${elapsed}ms`
+    );
+
+    if (upstream.status >= 400) {
+      const responseBody = await upstream.arrayBuffer();
+      const errorPreview = Buffer.from(responseBody).toString().slice(0, 500);
+      console.error(`[llm-proxy] ${provider} upstream error (${upstream.status}): ${errorPreview}`);
+      return {
+        status: upstream.status,
+        contentType: upstream.headers.get("content-type"),
+        body: Buffer.from(responseBody),
+      };
+    }
+
+    const responseBody = await upstream.arrayBuffer();
+    return {
+      status: upstream.status,
+      contentType: upstream.headers.get("content-type"),
+      body: Buffer.from(responseBody),
+    };
+  } catch (error) {
+    const elapsed = Date.now() - startTime;
+    const msg = error instanceof Error ? error.message : String(error);
+    console.error(`[llm-proxy] ${provider} fetch error after ${elapsed}ms: ${msg}`);
+    return {
+      status: msg.includes("abort") ? 504 : 502,
+      contentType: "application/json",
+      body: Buffer.from(
+        JSON.stringify({ error: msg.includes("abort") ? "Upstream timeout" : "Upstream error" })
+      ),
+    };
+  }
+}
+
+// ── Main request handler with failover ──────────────────────────────────
+
+async function handleRequestWithFailover(
+  req: Request,
+  res: Response,
+  primaryProvider: string,
+  primaryCreds: LlmCredentials & { sessionId: string },
+  proxyKey: string,
+  apiPath: string,
+  body: Buffer,
+  credentialStore: CredentialStore,
+  callbacks?: LlmProxyCallbacks
+): Promise<void> {
+  const modelChains = credentialStore.getModelChains(proxyKey);
+  const streaming = req.method === "POST" && body.length > 0 && isStreamingRequest(body);
+
+  // Build list of providers to try: primary first, then alternatives from chain
+  const providersToTry: Array<{ provider: string; creds: LlmCredentials; model: string | null }> = [
+    { provider: primaryProvider, creds: primaryCreds, model: null }, // null = don't rewrite model
+  ];
+
+  // Find alternative providers from model chains
+  if (modelChains) {
+    const requestModel = extractModelFromBody(body);
+    if (requestModel) {
+      const chain = modelChains[requestModel];
+      if (chain) {
+        for (const entry of chain) {
+          const altBaseProvider = entry.provider.split("-")[0];
+          if (altBaseProvider === primaryProvider.split("-")[0]) continue; // Skip same provider
+          const altCreds = credentialStore.getByLlmProxyKey(proxyKey, altBaseProvider);
+          if (altCreds) {
+            providersToTry.push({
+              provider: altBaseProvider,
+              creds: altCreds,
+              model: entry.model,
+            });
+          }
+        }
+      }
+    }
+  }
+
+  console.log(
+    `[llm-proxy] mode=${streaming ? "streaming" : "buffered"} bodySize=${body.length} providers=${providersToTry.map((p) => p.provider).join(",")}`
+  );
+
+  // Try each provider
+  for (let i = 0; i < providersToTry.length; i++) {
+    const attempt = providersToTry[i];
+    const isLastAttempt = i === providersToTry.length - 1;
+
+    // Rewrite model in body if needed (failover to different model)
+    let attemptBody = body;
+    if (attempt.model) {
+      attemptBody = rewriteModelInBody(body, attempt.model);
+    }
+
+    // Build upstream URL for this provider
+    const baseUrl = attempt.creds.baseUrl || PROVIDER_BASE_URLS[attempt.provider] || "";
+    if (!baseUrl) {
+      if (isLastAttempt) {
+        res.status(400).json({ error: `Unknown provider: ${attempt.provider}` });
+        return;
+      }
+      continue;
+    }
+
+    const finalApiPath = rewriteApiPath(apiPath, attempt.provider, baseUrl);
+    const upstreamUrl = `${baseUrl.replace(/\/$/, "")}/${finalApiPath}`;
+
+    // Build headers with injected auth
+    const headers: Record<string, string> = {};
+    if (req.headers["content-type"])
+      headers["Content-Type"] = req.headers["content-type"] as string;
+    if (req.headers["accept"]) headers["Accept"] = req.headers["accept"] as string;
+    if (req.headers["anthropic-version"])
+      headers["anthropic-version"] = req.headers["anthropic-version"] as string;
+    if (req.headers["anthropic-beta"])
+      headers["anthropic-beta"] = req.headers["anthropic-beta"] as string;
+    injectAuthHeaders(headers, attempt.provider, attempt.creds.apiKey);
+
+    if (i > 0) {
+      const rewriteInfo = finalApiPath !== apiPath ? ` (rewritten from ${apiPath})` : "";
+      console.log(
+        `[llm-proxy] FAILOVER: trying ${attempt.provider} (attempt ${i + 1}/${providersToTry.length}) model=${attempt.model}${rewriteInfo} → ${upstreamUrl}`
+      );
+    } else {
+      const rewriteInfo = finalApiPath !== apiPath ? ` (rewritten from ${apiPath})` : "";
+      console.log(
+        `[llm-proxy] ${req.method} ${attempt.provider}/${finalApiPath}${rewriteInfo} → ${upstreamUrl}`
+      );
+    }
+
+    if (streaming) {
+      const result = await attemptStreamingRequest(
+        upstreamUrl,
+        req.method,
+        headers,
+        attemptBody,
+        res,
+        attempt.provider
+      );
+
+      if (result === "success") {
+        trackLlmResult(proxyKey, attempt.provider, true, credentialStore, callbacks);
+        return;
+      }
+      if (result === "headers_sent") {
+        // Partially sent — can't retry, but it's a failure
+        trackLlmResult(proxyKey, attempt.provider, false, credentialStore, callbacks);
+        return;
+      }
+      // failed_before_headers — try next provider
+      trackLlmResult(proxyKey, attempt.provider, false, credentialStore, callbacks);
+
+      if (isLastAttempt) {
+        if (!res.headersSent) {
+          res.status(502).json({ error: "All providers failed" });
+        }
+        return;
+      }
+      continue;
+    } else {
+      const result = await attemptBufferedRequest(
+        upstreamUrl,
+        req.method,
+        headers,
+        attemptBody,
+        attempt.provider
+      );
+      const isServerError = result.status >= 500;
+
+      trackLlmResult(proxyKey, attempt.provider, !isServerError, credentialStore, callbacks);
+
+      if (!isServerError || isLastAttempt) {
+        // Success, 4xx, or last attempt — send response
+        res.status(result.status);
+        if (result.contentType) res.setHeader("Content-Type", result.contentType);
+        res.send(result.body);
+        return;
+      }
+
+      // 5xx and not last attempt — try next provider
+      console.log(
+        `[llm-proxy] ${attempt.provider} returned ${result.status}, trying next provider`
+      );
+      continue;
+    }
+  }
+}
+
+// ── Setup ───────────────────────────────────────────────────────────────
+
+export function setupLlmProxy(
+  app: Express,
+  credentialStore: CredentialStore,
+  callbacks?: LlmProxyCallbacks
+): void {
   // Raw body parser for LLM proxy routes
   const rawParser = (req: Request, res: Response, next: () => void) => {
     if (!req.path.startsWith("/llm-proxy/")) return next();
@@ -106,7 +564,7 @@ export function setupLlmProxy(app: Express, credentialStore: CredentialStore): v
     const provider = req.params.provider as string;
     const apiPath = (req.params[0] as string) || "";
 
-    // 1. Validate proxy key and look up credentials for the requested provider
+    // Validate proxy key and look up credentials for the requested provider
     const creds = credentialStore.getByLlmProxyKey(proxyKey, provider);
     if (!creds) {
       console.warn(`[llm-proxy] Invalid proxy key or unknown provider: ${provider}`);
@@ -114,242 +572,18 @@ export function setupLlmProxy(app: Express, credentialStore: CredentialStore): v
       return;
     }
 
-    // 2. Build upstream URL
-    const baseUrl = creds.baseUrl || PROVIDER_BASE_URLS[provider] || "";
-    if (!baseUrl) {
-      res.status(400).json({ error: `Unknown provider: ${provider}` });
-      return;
-    }
-
-    // Rewrite /v1/ prefix for providers that use a different API version path.
-    // OpenCode/OpenAI SDK always uses /v1/ but some providers need different paths.
-    let finalApiPath = apiPath;
-    const versionRewrite = API_VERSION_REWRITE[provider];
-    if (versionRewrite !== undefined && finalApiPath.startsWith("v1/")) {
-      if (versionRewrite === null) {
-        // Strip /v1/ entirely (base URL already has full path)
-        finalApiPath = finalApiPath.slice(3);
-      } else {
-        // Replace /v1/ with /vN/, but only if base URL doesn't already end with /vN
-        const baseEndsWithVersion = baseUrl.replace(/\/$/, "").endsWith(`/${versionRewrite}`);
-        if (baseEndsWithVersion) {
-          // Base already has version (e.g. .../v4), just strip /v1/
-          finalApiPath = finalApiPath.slice(3);
-        } else {
-          // Base doesn't have version, replace /v1/ with /vN/
-          finalApiPath = `${versionRewrite}/${finalApiPath.slice(3)}`;
-        }
-      }
-    }
-
-    const upstreamUrl = `${baseUrl.replace(/\/$/, "")}/${finalApiPath}`;
-
-    // Log the request with path rewrite details for debugging
-    const rewriteInfo = finalApiPath !== apiPath ? ` (rewritten from ${apiPath})` : "";
-    console.log(`[llm-proxy] ${req.method} ${provider}/${finalApiPath}${rewriteInfo} → ${upstreamUrl}`);
-
-    // 4. Build headers with injected auth
-    const headers: Record<string, string> = {};
-    if (req.headers["content-type"]) {
-      headers["Content-Type"] = req.headers["content-type"] as string;
-    }
-    if (req.headers["accept"]) {
-      headers["Accept"] = req.headers["accept"] as string;
-    }
-    // Forward anthropic-specific headers
-    if (req.headers["anthropic-version"]) {
-      headers["anthropic-version"] = req.headers["anthropic-version"] as string;
-    }
-    if (req.headers["anthropic-beta"]) {
-      headers["anthropic-beta"] = req.headers["anthropic-beta"] as string;
-    }
-
-    injectAuthHeaders(headers, provider, creds.apiKey);
-
     const body: Buffer = (req as any).rawBody || Buffer.alloc(0);
-    const streaming = req.method === "POST" && body.length > 0 && isStreamingRequest(body);
-    console.log(`[llm-proxy] mode=${streaming ? "streaming" : "buffered"} bodySize=${body.length}`);
 
-    if (streaming) {
-      // SSE streaming: use raw http/https to pipe response without buffering
-      await handleStreamingRequest(upstreamUrl, req.method, headers, body, res, provider);
-    } else {
-      // Non-streaming: use fetch, buffer and return
-      await handleBufferedRequest(upstreamUrl, req.method, headers, body, res, provider);
-    }
+    await handleRequestWithFailover(
+      req,
+      res,
+      provider,
+      creds,
+      proxyKey,
+      apiPath,
+      body,
+      credentialStore,
+      callbacks
+    );
   });
-}
-
-async function handleStreamingRequest(
-  url: string,
-  method: string,
-  headers: Record<string, string>,
-  body: Buffer,
-  res: Response,
-  provider: string
-): Promise<void> {
-  const startTime = Date.now();
-  return new Promise<void>((resolve) => {
-    const parsed = new URL(url);
-    const transport = parsed.protocol === "https:" ? https : http;
-
-    const options: http.RequestOptions = {
-      hostname: parsed.hostname,
-      port: parsed.port || (parsed.protocol === "https:" ? 443 : 80),
-      path: parsed.pathname + parsed.search,
-      method,
-      headers: {
-        ...headers,
-        "Content-Length": Buffer.byteLength(body).toString(),
-      },
-      timeout: CONNECT_TIMEOUT_MS,
-    };
-
-    let chunkCount = 0;
-    let totalBytes = 0;
-
-    const upstream = transport.request(options, (upstreamRes) => {
-      const ttfb = Date.now() - startTime;
-      console.log(`[llm-proxy] ${provider} upstream responded status=${upstreamRes.statusCode} ttfb=${ttfb}ms`);
-
-      if (upstreamRes.statusCode && upstreamRes.statusCode >= 400) {
-        // Log error response body for debugging
-        const errorChunks: Buffer[] = [];
-        upstreamRes.on("data", (chunk: Buffer) => errorChunks.push(chunk));
-        upstreamRes.on("end", () => {
-          const errorBody = Buffer.concat(errorChunks).toString().slice(0, 500);
-          console.error(`[llm-proxy] ${provider} upstream error body: ${errorBody}`);
-          res.writeHead(upstreamRes.statusCode || 502, {
-            "Content-Type": upstreamRes.headers["content-type"] || "application/json",
-          });
-          res.end(Buffer.concat(errorChunks));
-          resolve();
-        });
-        return;
-      }
-
-      // Forward status and headers
-      res.writeHead(upstreamRes.statusCode || 502, {
-        "Content-Type": upstreamRes.headers["content-type"] || "text/event-stream",
-        "Cache-Control": "no-cache",
-        Connection: "keep-alive",
-        ...(upstreamRes.headers["x-request-id"]
-          ? { "x-request-id": upstreamRes.headers["x-request-id"] }
-          : {}),
-      });
-
-      // Pipe upstream SSE chunks directly to client
-      upstreamRes.on("data", (chunk: Buffer) => {
-        chunkCount++;
-        totalBytes += chunk.length;
-        res.write(chunk);
-      });
-
-      upstreamRes.on("end", () => {
-        const elapsed = Date.now() - startTime;
-        console.log(`[llm-proxy] ${provider} stream done chunks=${chunkCount} bytes=${totalBytes} elapsed=${elapsed}ms`);
-        res.end();
-        resolve();
-      });
-
-      upstreamRes.on("error", (err) => {
-        const elapsed = Date.now() - startTime;
-        console.error(`[llm-proxy] ${provider} upstream stream error after ${elapsed}ms: ${err.message}`);
-        res.end();
-        resolve();
-      });
-
-      // Read timeout — if no data for READ_TIMEOUT_MS, close
-      upstreamRes.setTimeout(READ_TIMEOUT_MS, () => {
-        const elapsed = Date.now() - startTime;
-        console.warn(`[llm-proxy] ${provider} read timeout after ${elapsed}ms chunks=${chunkCount}`);
-        upstreamRes.destroy();
-        res.end();
-        resolve();
-      });
-    });
-
-    upstream.on("timeout", () => {
-      const elapsed = Date.now() - startTime;
-      console.warn(`[llm-proxy] ${provider} connect timeout after ${elapsed}ms`);
-      upstream.destroy();
-      if (!res.headersSent) {
-        res.status(504).json({ error: "Upstream connect timeout" });
-      }
-      resolve();
-    });
-
-    upstream.on("error", (err) => {
-      const elapsed = Date.now() - startTime;
-      console.error(`[llm-proxy] ${provider} request error after ${elapsed}ms: ${err.message}`);
-      if (!res.headersSent) {
-        res.status(502).json({ error: "Upstream error" });
-      }
-      resolve();
-    });
-
-    upstream.write(body);
-    upstream.end();
-  });
-}
-
-async function handleBufferedRequest(
-  url: string,
-  method: string,
-  headers: Record<string, string>,
-  body: Buffer,
-  res: Response,
-  provider: string
-): Promise<void> {
-  const startTime = Date.now();
-  try {
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), READ_TIMEOUT_MS);
-
-    const fetchOptions: RequestInit = {
-      method,
-      headers,
-      signal: controller.signal,
-    };
-
-    if (method !== "GET" && method !== "HEAD" && body.length > 0) {
-      fetchOptions.body = body;
-    }
-
-    const upstream = await fetch(url, fetchOptions);
-    clearTimeout(timeout);
-
-    const elapsed = Date.now() - startTime;
-    console.log(`[llm-proxy] ${provider} buffered response status=${upstream.status} elapsed=${elapsed}ms`);
-
-    // Forward status
-    res.status(upstream.status);
-
-    // Forward relevant headers
-    const contentType = upstream.headers.get("content-type");
-    if (contentType) res.setHeader("Content-Type", contentType);
-
-    const requestId = upstream.headers.get("x-request-id");
-    if (requestId) res.setHeader("x-request-id", requestId);
-
-    // Send body
-    const responseBody = await upstream.arrayBuffer();
-    if (upstream.status >= 400) {
-      const errorPreview = Buffer.from(responseBody).toString().slice(0, 500);
-      console.error(`[llm-proxy] ${provider} upstream error (${upstream.status}): ${errorPreview}`);
-    }
-    res.send(Buffer.from(responseBody));
-  } catch (error) {
-    const elapsed = Date.now() - startTime;
-    const msg = error instanceof Error ? error.message : String(error);
-    console.error(`[llm-proxy] ${provider} fetch error after ${elapsed}ms: ${msg}`);
-
-    if (!res.headersSent) {
-      if (msg.includes("abort")) {
-        res.status(504).json({ error: "Upstream timeout" });
-      } else {
-        res.status(502).json({ error: "Upstream error" });
-      }
-    }
-  }
 }

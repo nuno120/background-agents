@@ -171,6 +171,12 @@ export class SessionInstance {
   private availableLlmProviders: string[] = [];
   private agentModels: Record<string, string> | null = null;
   private agentFiles: Record<string, string> | null = null;
+  private modelChains: Record<string, Array<{ provider: string; model: string }>> | null = null;
+  private lastSuccessfulLlmCall: number | null = null;
+  private lastLlmCallAttempt: number | null = null;
+  private llmCallAttemptCount = 0;
+  private static readonly LLM_FAILURE_TIMEOUT_MS = 300_000; // 5 minutes of LLM failures → kill
+  private static readonly LLM_MIN_ATTEMPTS_BEFORE_KILL = 3; // Minimum failed attempts before C3 triggers
 
   constructor(
     private sessionId: string,
@@ -241,26 +247,23 @@ export class SessionInstance {
   }
 
   private async handleAlarm(): Promise<void> {
-    // Simplified alarm handler — just checks inactivity
     const sandbox = this.getSandbox();
     if (!sandbox) return;
 
     if (sandbox.status === "stopped" || sandbox.status === "failed" || sandbox.status === "stale")
       return;
 
-    // Check inactivity
-    const timeoutMs = parseInt(this.config.SANDBOX_INACTIVITY_TIMEOUT_MS || "600000", 10);
+    const now = Date.now();
+    const inactivityTimeoutMs = parseInt(this.config.SANDBOX_INACTIVITY_TIMEOUT_MS || "600000", 10);
+
+    // Check 1: Total inactivity (no sandbox activity at all)
     if (sandbox.last_activity) {
-      const inactiveTime = Date.now() - sandbox.last_activity;
-      if (inactiveTime >= timeoutMs) {
-        this.log.info("Inactivity timeout", {
-          last_activity: sandbox.last_activity,
-        });
+      const inactiveTime = now - sandbox.last_activity;
+      if (inactiveTime >= inactivityTimeoutMs) {
+        this.log.info("Inactivity timeout", { last_activity: sandbox.last_activity });
         this.updateSandboxStatus("stopped");
         this.broadcast({ type: "sandbox_status", status: "stopped" });
-        // Destroy the container (non-fatal)
         await this.destroySandboxContainer();
-        // Send shutdown to sandbox
         const sandboxSocket = this.wsManager.getSandboxSocket();
         if (sandboxSocket) {
           this.wsManager.send(sandboxSocket, { type: "shutdown" });
@@ -269,8 +272,42 @@ export class SessionInstance {
       }
     }
 
-    // Reschedule
-    this.scheduleAlarm(Date.now() + timeoutMs);
+    // Check 2 (C3): LLM health — if LLM calls have been failing for too long
+    // Requires minimum number of attempts to avoid false-triggers on initial startup
+    if (
+      this.lastLlmCallAttempt &&
+      this.llmCallAttemptCount >= SessionInstance.LLM_MIN_ATTEMPTS_BEFORE_KILL
+    ) {
+      const referenceTime = this.lastSuccessfulLlmCall || this.lastLlmCallAttempt;
+      const failingDuration = now - referenceTime;
+
+      if (failingDuration >= SessionInstance.LLM_FAILURE_TIMEOUT_MS) {
+        this.log.warn("LLM failure timeout", {
+          lastSuccessfulLlmCall: this.lastSuccessfulLlmCall,
+          lastLlmCallAttempt: this.lastLlmCallAttempt,
+          llmCallAttemptCount: this.llmCallAttemptCount,
+          failingMs: failingDuration,
+        });
+
+        // Fire provider_unhealthy event + webhook
+        await this.processSandboxEvent({
+          type: "provider_unhealthy",
+          reason: "llm_failure_timeout",
+          source: "activity_watchdog",
+          failingMs: failingDuration,
+          timestamp: now,
+        });
+
+        // Kill the sandbox
+        this.updateSandboxStatus("failed");
+        this.broadcast({ type: "sandbox_error", error: "LLM provider unresponsive" });
+        await this.destroySandboxContainer();
+        return;
+      }
+    }
+
+    // Reschedule — check every minute at most
+    this.scheduleAlarm(now + Math.min(inactivityTimeoutMs, 60_000));
   }
 
   /**
@@ -768,7 +805,17 @@ export class SessionInstance {
     }
   }
 
-  private async processSandboxEvent(event: any): Promise<void> {
+  /** Called by proxy on each LLM call result for C3 health tracking. */
+  updateLlmHealth(success: boolean): void {
+    const now = Date.now();
+    this.lastLlmCallAttempt = now;
+    this.llmCallAttemptCount++;
+    if (success) {
+      this.lastSuccessfulLlmCall = now;
+    }
+  }
+
+  async processSandboxEvent(event: any): Promise<void> {
     const now = Date.now();
 
     switch (event.type) {
@@ -932,6 +979,30 @@ export class SessionInstance {
         this.broadcast({ type: "sandbox_event", event });
         break;
 
+      case "provider_unhealthy":
+        this.sql.exec(
+          `INSERT INTO events (id, type, data, message_id, created_at) VALUES (?, ?, ?, ?, ?)`,
+          generateId(),
+          "provider_unhealthy",
+          JSON.stringify(event),
+          null,
+          now
+        );
+        this.broadcast({ type: "sandbox_event", event });
+
+        // Fire failure webhook so Druppie can retry with a different model
+        {
+          const processingMsg = this.sql
+            .exec("SELECT id FROM messages WHERE status = 'processing' LIMIT 1")
+            .toArray()[0] as any;
+          if (processingMsg) {
+            this.sendWebhookCallback(processingMsg.id, false).catch((err) => {
+              this.log.error("Provider unhealthy webhook failed", { error: String(err) });
+            });
+          }
+        }
+        break;
+
       default:
         // Forward unknown events to clients
         this.broadcast({ type: "sandbox_event", event });
@@ -998,6 +1069,9 @@ export class SessionInstance {
       }
       if (this.agentFiles) {
         userEnvVars["SANDBOX_AGENT_FILES"] = JSON.stringify(this.agentFiles);
+      }
+      if (this.modelChains) {
+        userEnvVars["SANDBOX_MODEL_CHAINS"] = JSON.stringify(this.modelChains);
       }
 
       // Extract provider from model string (e.g. "zai-coding-plan/glm-4.7" -> "zai-coding-plan")
@@ -1082,6 +1156,9 @@ export class SessionInstance {
       }
       if (this.agentFiles) {
         userEnvVars["SANDBOX_AGENT_FILES"] = JSON.stringify(this.agentFiles);
+      }
+      if (this.modelChains) {
+        userEnvVars["SANDBOX_MODEL_CHAINS"] = JSON.stringify(this.modelChains);
       }
 
       // Extract provider from model string (e.g. "zai-coding-plan/glm-4.7" -> "zai-coding-plan")
@@ -1261,6 +1338,7 @@ export class SessionInstance {
     // Store per-agent model overrides and agent definition files
     this.agentModels = body.agentModels ?? null;
     this.agentFiles = body.agentFiles ?? null;
+    this.modelChains = body.modelChains ?? null;
 
     // Trigger warm sandbox
     this.warmSandbox().catch(console.error);

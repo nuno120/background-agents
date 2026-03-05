@@ -162,7 +162,7 @@ export function setupRoutes(
     let proxyKeys: { gitProxyKey: string | null; llmProxyKey: string | null } | null = null;
     let availableLlmProviders: string[] = [];
     if (credentialStore && body.credentials) {
-      proxyKeys = credentialStore.store(sessionId, body.credentials);
+      proxyKeys = credentialStore.store(sessionId, body.credentials, body.modelChains ?? null);
       availableLlmProviders = credentialStore.getAvailableProviders(sessionId);
     }
 
@@ -184,6 +184,7 @@ export function setupRoutes(
       availableLlmProviders,
       agentModels: body.agentModels ?? null,
       agentFiles: body.agentFiles ?? null,
+      modelChains: body.modelChains ?? null,
     });
 
     if (!initResult) {

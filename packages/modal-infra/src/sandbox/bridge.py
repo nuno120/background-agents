@@ -123,6 +123,7 @@ class AgentBridge:
     HEARTBEAT_INTERVAL = 30.0
     RECONNECT_BACKOFF_BASE = 2.0
     RECONNECT_MAX_DELAY = 60.0
+    CONSECUTIVE_LLM_ERROR_THRESHOLD = 3
     SSE_INACTIVITY_TIMEOUT = 120.0
     SSE_INACTIVITY_TIMEOUT_MIN = 5.0
     SSE_INACTIVITY_TIMEOUT_MAX = 3600.0
@@ -176,6 +177,9 @@ class AgentBridge:
 
         # Track the current prompt task so _handle_stop can cancel it
         self._current_prompt_task: asyncio.Task[None] | None = None
+
+        # C2: Consecutive LLM error tracking
+        self._consecutive_llm_errors = 0
 
     @property
     def ws_url(self) -> str:
@@ -544,6 +548,37 @@ class AgentBridge:
             return error.get("message") or error.get("name")
         return str(error) if error else None
 
+    @staticmethod
+    def _is_llm_provider_error(error_msg: str | None) -> bool:
+        """Check if an error message indicates an LLM provider failure (C2)."""
+        if not error_msg:
+            return False
+        error_lower = error_msg.lower()
+        llm_patterns = [
+            "bad gateway",
+            "gateway timeout",
+            "service unavailable",
+            "internal server error",
+            "status 502",
+            "status 504",
+            "status 503",
+            "status 500",
+            "status 429",
+            "http 502",
+            "http 504",
+            "http 503",
+            "http 500",
+            "rate limit",
+            "too many requests",
+            "connection refused",
+            "connection reset",
+            "timed out",
+            "connect timeout",
+            "read timeout",
+            "all providers failed",
+        ]
+        return any(pattern in error_lower for pattern in llm_patterns)
+
     def _transform_part_to_event(
         self,
         part: dict[str, Any],
@@ -910,6 +945,10 @@ class AgentBridge:
                                         role = info.get("role", "")
                                         finish = info.get("finish", "")
 
+                                        # C2: LLM is producing output — reset error counter
+                                        if role == "assistant":
+                                            self._consecutive_llm_errors = 0
+
                                         self.log.debug(
                                             "bridge.message_updated",
                                             role=role,
@@ -1035,6 +1074,33 @@ class AgentBridge:
                                             props.get("error", {})
                                         )
                                         self.log.error("bridge.session_error", error_msg=error_msg)
+
+                                        # C2: Track consecutive LLM errors
+                                        if self._is_llm_provider_error(error_msg):
+                                            self._consecutive_llm_errors += 1
+                                            if (
+                                                self._consecutive_llm_errors
+                                                >= self.CONSECUTIVE_LLM_ERROR_THRESHOLD
+                                            ):
+                                                self.log.warning(
+                                                    "bridge.provider_unhealthy",
+                                                    consecutive_errors=self._consecutive_llm_errors,
+                                                    error_msg=error_msg,
+                                                )
+                                                await self._send_event(
+                                                    {
+                                                        "type": "provider_unhealthy",
+                                                        "reason": "bridge_detected_consecutive_llm_errors",
+                                                        "source": "bridge",
+                                                        "consecutiveErrors": self._consecutive_llm_errors,
+                                                        "lastError": error_msg or "Unknown",
+                                                        "messageId": message_id,
+                                                    }
+                                                )
+                                                self._consecutive_llm_errors = 0
+                                        else:
+                                            self._consecutive_llm_errors = 0
+
                                         yield {
                                             "type": "error",
                                             "error": error_msg or "Unknown error",
@@ -1186,14 +1252,16 @@ class AgentBridge:
             conversation_messages = []
             for msg in messages:
                 info = msg.get("info", {})
-                conversation_messages.append({
-                    "id": info.get("id", ""),
-                    "role": info.get("role", ""),
-                    "parentId": info.get("parentID"),
-                    "sessionId": info.get("sessionID"),
-                    "finish": info.get("finish"),
-                    "parts": msg.get("parts", []),
-                })
+                conversation_messages.append(
+                    {
+                        "id": info.get("id", ""),
+                        "role": info.get("role", ""),
+                        "parentId": info.get("parentID"),
+                        "sessionId": info.get("sessionID"),
+                        "finish": info.get("finish"),
+                        "parts": msg.get("parts", []),
+                    }
+                )
             if conversation_messages:
                 yield {
                     "type": "conversation_history",
