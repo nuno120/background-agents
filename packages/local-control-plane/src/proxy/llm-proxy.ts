@@ -98,18 +98,27 @@ function isStreamingRequest(body: Buffer): boolean {
 function rewriteApiPath(apiPath: string, provider: string, baseUrl: string): string {
   let finalPath = apiPath;
   const versionRewrite = API_VERSION_REWRITE[provider];
-  if (versionRewrite !== undefined && finalPath.startsWith("v1/")) {
+  if (versionRewrite === undefined) return finalPath;
+
+  const baseEndsWithVersion = baseUrl.replace(/\/$/, "").endsWith(`/${versionRewrite}`);
+
+  if (finalPath.startsWith("v1/")) {
     if (versionRewrite === null) {
+      // Strip v1/ entirely (e.g. deepinfra base URL already includes /v1/openai)
+      finalPath = finalPath.slice(3);
+    } else if (baseEndsWithVersion) {
+      // Base URL already ends with the version — just strip v1/
       finalPath = finalPath.slice(3);
     } else {
-      const baseEndsWithVersion = baseUrl.replace(/\/$/, "").endsWith(`/${versionRewrite}`);
-      if (baseEndsWithVersion) {
-        finalPath = finalPath.slice(3);
-      } else {
-        finalPath = `${versionRewrite}/${finalPath.slice(3)}`;
-      }
+      // Replace v1/ with target version
+      finalPath = `${versionRewrite}/${finalPath.slice(3)}`;
     }
+  } else if (versionRewrite !== null && !baseEndsWithVersion) {
+    // Path has no version prefix (e.g. "chat/completions") and base URL doesn't
+    // include the version — prepend target version (e.g. "v4/chat/completions")
+    finalPath = `${versionRewrite}/${finalPath}`;
   }
+
   return finalPath;
 }
 
