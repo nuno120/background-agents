@@ -33,7 +33,7 @@ const PROVIDER_BASE_URLS: Record<string, string> = {
   openai: "https://api.openai.com",
   zai: "https://open.bigmodel.cn/api/paas",
   deepseek: "https://api.deepseek.com",
-  deepinfra: "https://api.deepinfra.com/v1/openai",
+  deepinfra: "https://api.deepinfra.com/v1",
 };
 
 /**
@@ -45,7 +45,7 @@ const PROVIDER_BASE_URLS: Record<string, string> = {
  */
 const API_VERSION_REWRITE: Record<string, string | null> = {
   zai: "v4", // zai uses /v4/chat/completions, not /v1/chat/completions
-  deepinfra: null, // deepinfra base URL is .../v1/openai, paths are /chat/completions directly
+  deepinfra: null, // deepinfra base URL is .../v1, SDK sends openai/chat/completions — no rewrite needed
 };
 
 // ── Error tracking (C1) ─────────────────────────────────────────────────
@@ -104,7 +104,7 @@ function rewriteApiPath(apiPath: string, provider: string, baseUrl: string): str
 
   if (finalPath.startsWith("v1/")) {
     if (versionRewrite === null) {
-      // Strip v1/ entirely (e.g. deepinfra base URL already includes /v1/openai)
+      // Strip v1/ entirely (e.g. deepinfra base URL already includes /v1)
       finalPath = finalPath.slice(3);
     } else if (baseEndsWithVersion) {
       // Base URL already ends with the version — just strip v1/
