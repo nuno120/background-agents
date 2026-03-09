@@ -68,6 +68,10 @@ RUN npm install -g opencode-ai@1.2.22 \
 RUN playwright install chromium \
     && playwright install-deps chromium
 
+# Default git identity (prevents agent from wasting time configuring)
+RUN git config --global user.name "Sandbox Agent" \
+    && git config --global user.email "sandbox@druppie.local"
+
 # Working directories
 RUN mkdir -p /workspace /app/plugins /tmp/opencode \
     && echo 'Image built for local Kata sandbox' > /app/image-version.txt

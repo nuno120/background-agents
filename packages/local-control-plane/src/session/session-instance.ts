@@ -1507,7 +1507,7 @@ export class SessionInstance {
   }
 
   handleListEvents(query: any): any {
-    const limit = Math.min(parseInt(query.limit ?? "50"), 200);
+    const limit = Math.min(parseInt(query.limit ?? "50"), 2000);
     const cursor = query.cursor;
     const type = query.type;
     const messageId = query.message_id;
