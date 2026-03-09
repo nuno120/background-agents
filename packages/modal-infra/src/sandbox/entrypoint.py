@@ -273,8 +273,6 @@ class SandboxSupervisor:
         self.log.info("opencode.start")
 
         # Build OpenCode config from session settings
-        # Model format is "provider/model", e.g. "anthropic/claude-sonnet-4-6"
-        provider = self.session_config.get("provider", "anthropic")
         model = self.session_config.get("model", "claude-sonnet-4-6")
         opencode_config = {
             "model": model,
@@ -357,46 +355,46 @@ class SandboxSupervisor:
                 opencode_config["agent"] = agents_config
             self.log.info("opencode.agent_models_configured", overrides=agents_config)
 
-        # If LLM_PROXY_URL is set, override provider baseURLs and apiKeys
-        # in the OpenCode config so ALL providers route through the control plane
-        # proxy. Supports multi-provider: each provider gets its own proxy URL.
+        # If LLM_PROXY_URL is set, configure the "sandbox" virtual provider
+        # using @ai-sdk/openai-compatible so OpenCode accepts arbitrary
+        # profile-based model names (e.g. "sandbox/druppie-builder").
+        # The proxy resolves profile names to real provider chains.
         llm_proxy = os.environ.get("LLM_PROXY_URL")
         if llm_proxy:
-            available_json = os.environ.get("AVAILABLE_LLM_PROVIDERS", "")
-            base_providers = json.loads(available_json) if available_json else []
-            if not base_providers:
-                # Fallback: derive base provider from the main model's provider
-                base_providers = [provider.split("-")[0]]
+            # Build models dict from agent_models so OpenCode registers each profile.
+            # Each key is a profile name (e.g. "druppie-builder") which OpenCode
+            # sees as "sandbox/druppie-builder" (provider/model).
+            models_dict = {}
+            for profile_name in agent_models:
+                models_dict[profile_name] = {"name": profile_name}
+            # Ensure the global model profile is also registered
+            if "/" in model:
+                global_profile = model.split("/", 1)[1]
+                if global_profile not in models_dict:
+                    models_dict[global_profile] = {"name": global_profile}
 
-            # Collect all providers needed: base providers + providers from agent models
-            all_providers = set(base_providers)
-            for agent_model in agent_models.values():
-                if "/" in agent_model:
-                    prov = agent_model.split("/")[0]
-                    # Map sub-provider names to base provider for proxy routing
-                    # e.g. "zai-coding-plan" -> base provider "zai" already in set
-                    all_providers.add(prov)
-
-            provider_config = {}
-            for prov in all_providers:
-                # Route through proxy using the base provider name for credential lookup
-                # e.g. "zai-coding-plan" proxies via "zai" path, "deepinfra" via "deepinfra"
-                base_prov = prov.split("-")[0]
-                proxy_base = f"{llm_proxy}/{base_prov}"
-                provider_config[prov] = {
+            opencode_config["provider"] = {
+                "sandbox": {
+                    "npm": "@ai-sdk/openai-compatible",
+                    "name": "Sandbox LLM Proxy",
                     "options": {
-                        "baseURL": proxy_base,
+                        "baseURL": f"{llm_proxy}/sandbox",
                         "apiKey": "proxy-managed",
-                    }
+                    },
+                    "models": models_dict,
                 }
-            opencode_config["provider"] = provider_config
+            }
 
-        # Write config to file — OpenCode reads from config.json, not env vars.
-        # The global config path is ~/.config/opencode/config.json.
+        # Write config to both global and project locations.
+        # Global: ~/.config/opencode/config.json (general settings)
+        # Project: {workdir}/opencode.json (custom provider with npm package)
         config_dir = Path.home() / ".config" / "opencode"
         config_dir.mkdir(parents=True, exist_ok=True)
         config_file = config_dir / "config.json"
         config_file.write_text(json.dumps(opencode_config))
+        # Also write to project dir so OpenCode can resolve the npm package
+        project_config = workdir / "opencode.json"
+        project_config.write_text(json.dumps(opencode_config))
         self.log.info("opencode.config_written", path=str(config_file), config=opencode_config)
 
         env = {

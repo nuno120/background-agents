@@ -13,7 +13,7 @@
  * Resilience features:
  * - Per-session error tracking (C1) — consecutive 5xx trigger provider_unhealthy
  * - LLM result callbacks (C3) — feed session-level health tracking
- * - Transparent failover (A) — on 5xx, try next provider in model chain
+ * - Transparent failover (A) — on 5xx or 429, try next provider in model chain
  */
 
 import http from "node:http";
@@ -219,15 +219,18 @@ async function attemptStreamingRequest(
         `[llm-proxy] ${provider} upstream responded status=${upstreamRes.statusCode} ttfb=${ttfb}ms`
       );
 
-      if (upstreamRes.statusCode && upstreamRes.statusCode >= 500) {
-        // 5xx BEFORE headers sent — can retry with failover
+      if (
+        upstreamRes.statusCode &&
+        (upstreamRes.statusCode >= 500 || upstreamRes.statusCode === 429)
+      ) {
+        // 5xx or 429 (rate limit) BEFORE headers sent — can retry with failover
         upstreamRes.resume();
         upstreamRes.on("end", () => resolve("failed_before_headers"));
         return;
       }
 
       if (upstreamRes.statusCode && upstreamRes.statusCode >= 400) {
-        // 4xx — forward error, no retry
+        // 4xx (except 429) — forward error, no retry
         const errorChunks: Buffer[] = [];
         upstreamRes.on("data", (chunk: Buffer) => errorChunks.push(chunk));
         upstreamRes.on("end", () => {
@@ -381,7 +384,7 @@ async function handleRequestWithFailover(
   req: Request,
   res: Response,
   primaryProvider: string,
-  primaryCreds: LlmCredentials & { sessionId: string },
+  primaryCreds: (LlmCredentials & { sessionId: string }) | null,
   proxyKey: string,
   apiPath: string,
   body: Buffer,
@@ -391,27 +394,70 @@ async function handleRequestWithFailover(
   const modelChains = credentialStore.getModelChains(proxyKey);
   const streaming = req.method === "POST" && body.length > 0 && isStreamingRequest(body);
 
-  // Build list of providers to try: primary first, then alternatives from chain
-  const providersToTry: Array<{ provider: string; creds: LlmCredentials; model: string | null }> = [
-    { provider: primaryProvider, creds: primaryCreds, model: null }, // null = don't rewrite model
-  ];
+  // Build list of providers to try
+  const providersToTry: Array<{ provider: string; creds: LlmCredentials; model: string | null }> =
+    [];
 
-  // Find alternative providers from model chains
-  if (modelChains) {
-    const requestModel = extractModelFromBody(body);
-    if (requestModel) {
-      const chain = modelChains[requestModel];
-      if (chain) {
-        for (const entry of chain) {
-          const altBaseProvider = entry.provider.split("-")[0];
-          if (altBaseProvider === primaryProvider.split("-")[0]) continue; // Skip same provider
-          const altCreds = credentialStore.getByLlmProxyKey(proxyKey, altBaseProvider);
-          if (altCreds) {
-            providersToTry.push({
-              provider: altBaseProvider,
-              creds: altCreds,
-              model: entry.model,
-            });
+  if (primaryProvider === "sandbox") {
+    // Profile-based routing: model name in body IS the profile name.
+    // Look up the chain for this profile and try each real provider in order.
+    const profileName = extractModelFromBody(body);
+    if (!profileName || !modelChains) {
+      res.status(400).json({ error: "Missing profile name or model chains for sandbox routing" });
+      return;
+    }
+
+    const chain = modelChains[profileName];
+    if (!chain || chain.length === 0) {
+      res.status(400).json({ error: `Unknown sandbox profile: ${profileName}` });
+      return;
+    }
+
+    for (const entry of chain) {
+      const creds = credentialStore.getByLlmProxyKey(proxyKey, entry.provider);
+      if (creds) {
+        providersToTry.push({
+          provider: entry.provider,
+          creds,
+          model: entry.model,
+        });
+      }
+    }
+
+    if (providersToTry.length === 0) {
+      res.status(500).json({ error: "No credentials available for any provider in chain" });
+      return;
+    }
+
+    console.log(
+      `[llm-proxy] sandbox profile=${profileName} chain=${providersToTry.map((p) => p.provider).join(",")}`
+    );
+  } else {
+    // Direct provider routing (legacy path): provider in URL is primary
+    if (!primaryCreds) {
+      res.status(403).json({ error: "Invalid proxy key or provider" });
+      return;
+    }
+    providersToTry.push({ provider: primaryProvider, creds: primaryCreds, model: null });
+
+    // Find alternative providers from model chains for failover
+    if (modelChains) {
+      const requestModel = extractModelFromBody(body);
+      if (requestModel) {
+        const chain =
+          modelChains[requestModel] || modelChains[`${primaryProvider}/${requestModel}`];
+        if (chain) {
+          for (const entry of chain) {
+            const altBaseProvider = entry.provider.split("-")[0];
+            if (altBaseProvider === primaryProvider.split("-")[0]) continue;
+            const altCreds = credentialStore.getByLlmProxyKey(proxyKey, altBaseProvider);
+            if (altCreds) {
+              providersToTry.push({
+                provider: altBaseProvider,
+                creds: altCreds,
+                model: entry.model,
+              });
+            }
           }
         }
       }
@@ -427,10 +473,26 @@ async function handleRequestWithFailover(
     const attempt = providersToTry[i];
     const isLastAttempt = i === providersToTry.length - 1;
 
-    // Rewrite model in body if needed (failover to different model)
+    // Strip provider prefix from model name in request body.
+    // Providers expect just the model name, not the routing prefix
+    // (e.g. "deepinfra/Qwen/Qwen3-32B" → "Qwen/Qwen3-32B").
+    // This applies to BOTH primary and failover attempts because OpenCode
+    // may or may not strip the prefix depending on model name format.
     let attemptBody = body;
+    const baseProvider = attempt.provider.split("-")[0];
     if (attempt.model) {
-      attemptBody = rewriteModelInBody(body, attempt.model);
+      let apiModel = attempt.model;
+      if (apiModel.startsWith(`${baseProvider}/`)) {
+        apiModel = apiModel.slice(baseProvider.length + 1);
+      }
+      attemptBody = rewriteModelInBody(body, apiModel);
+    } else {
+      // Primary attempt: check if model in body has the provider prefix
+      const bodyModel = extractModelFromBody(body);
+      if (bodyModel && bodyModel.startsWith(`${baseProvider}/`)) {
+        const stripped = bodyModel.slice(baseProvider.length + 1);
+        attemptBody = rewriteModelInBody(body, stripped);
+      }
     }
 
     // Build upstream URL for this provider
@@ -506,19 +568,19 @@ async function handleRequestWithFailover(
         attemptBody,
         attempt.provider
       );
-      const isServerError = result.status >= 500;
+      const isRetryable = result.status >= 500 || result.status === 429;
 
-      trackLlmResult(proxyKey, attempt.provider, !isServerError, credentialStore, callbacks);
+      trackLlmResult(proxyKey, attempt.provider, !isRetryable, credentialStore, callbacks);
 
-      if (!isServerError || isLastAttempt) {
-        // Success, 4xx, or last attempt — send response
+      if (!isRetryable || isLastAttempt) {
+        // Success, non-retriable 4xx, or last attempt — send response
         res.status(result.status);
         if (result.contentType) res.setHeader("Content-Type", result.contentType);
         res.send(result.body);
         return;
       }
 
-      // 5xx and not last attempt — try next provider
+      // 5xx/429 and not last attempt — try next provider
       console.log(
         `[llm-proxy] ${attempt.provider} returned ${result.status}, trying next provider`
       );
@@ -573,15 +635,39 @@ export function setupLlmProxy(
     const provider = req.params.provider as string;
     const apiPath = (req.params[0] as string) || "";
 
-    // Validate proxy key and look up credentials for the requested provider
+    const body: Buffer = (req as any).rawBody || Buffer.alloc(0);
+
+    if (provider === "sandbox") {
+      // Virtual "sandbox" provider — just verify the proxy key is valid.
+      // Real provider credentials are resolved per-attempt from the chain.
+      const sessionId = credentialStore.getSessionIdByLlmProxyKey(proxyKey);
+      if (!sessionId) {
+        console.warn(`[llm-proxy] Invalid proxy key for sandbox provider`);
+        res.status(403).json({ error: "Invalid proxy key" });
+        return;
+      }
+
+      await handleRequestWithFailover(
+        req,
+        res,
+        provider,
+        null,
+        proxyKey,
+        apiPath,
+        body,
+        credentialStore,
+        callbacks
+      );
+      return;
+    }
+
+    // Direct provider routing — look up credentials for the specific provider
     const creds = credentialStore.getByLlmProxyKey(proxyKey, provider);
     if (!creds) {
       console.warn(`[llm-proxy] Invalid proxy key or unknown provider: ${provider}`);
       res.status(403).json({ error: "Invalid proxy key or provider" });
       return;
     }
-
-    const body: Buffer = (req as any).rawBody || Buffer.alloc(0);
 
     await handleRequestWithFailover(
       req,

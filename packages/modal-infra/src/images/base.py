@@ -102,7 +102,7 @@ base_image = (
         "opencode --version || echo 'OpenCode installed'",
         # Install @opencode-ai/plugin globally for custom tools
         # This ensures tools can import the plugin without needing to run bun add
-        "npm install -g @opencode-ai/plugin@latest zod",
+        "npm install -g @opencode-ai/plugin@latest @ai-sdk/openai-compatible zod",
     )
     # Install Playwright browsers (Chromium only to save space)
     .run_commands(
