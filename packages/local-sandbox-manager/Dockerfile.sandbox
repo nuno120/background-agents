@@ -60,9 +60,9 @@ RUN pip install --no-cache-dir \
     "PyJWT[crypto]"
 
 # OpenCode CLI and plugin
-RUN npm install -g opencode-ai@latest \
+RUN npm install -g opencode-ai@1.2.22 \
     && (opencode --version || echo 'OpenCode installed') \
-    && npm install -g @opencode-ai/plugin@latest zod
+    && npm install -g @opencode-ai/plugin@1.2.22 zod
 
 # Playwright browsers (Chromium only)
 RUN playwright install chromium \
