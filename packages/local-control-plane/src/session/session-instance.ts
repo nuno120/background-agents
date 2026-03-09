@@ -919,7 +919,17 @@ export class SessionInstance {
         this.broadcast({ type: "processing_status", isProcessing: false });
         this.updateSandboxLastActivity(now);
 
-        // Process next message in queue
+        // Destroy the sandbox container — execution is done, no reason to keep it alive.
+        // This also prevents the alarm watchdog from firing a stale provider_unhealthy
+        // event minutes later (the C3 check would otherwise timeout on frozen LLM health fields).
+        this.updateSandboxStatus("stopped");
+        this.destroySandboxContainer().catch((e) =>
+          this.log.error("Container destroy after execution_complete failed", {
+            error: e instanceof Error ? e.message : String(e),
+          })
+        );
+
+        // Process next message in queue (no-op if queue is empty)
         await this.processMessageQueue();
         break;
 
