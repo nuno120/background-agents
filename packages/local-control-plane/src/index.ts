@@ -35,11 +35,11 @@ const sessionIndex = new LocalSessionIndexStore(indexDb);
 // Sandbox client — HTTP client for the local sandbox manager
 const sandboxClient = createLocalSandboxClient(config.MODAL_API_SECRET, config.SANDBOX_MANAGER_URL);
 
-// Session manager — Map<sessionId, SessionInstance>
-const sessionManager = new SessionManager(sandboxClient, sessionIndex);
-
 // Credential store — in-memory, per-session credential storage for proxy endpoints
 const credentialStore = new CredentialStore();
+
+// Session manager — Map<sessionId, SessionInstance>
+const sessionManager = new SessionManager(sandboxClient, sessionIndex, credentialStore);
 
 // ── Express app ──────────────────────────────────────────────────────────
 

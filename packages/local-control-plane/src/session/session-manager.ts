@@ -12,6 +12,7 @@ import { SessionInstance } from "./session-instance.js";
 import { SqlStorageAdapter } from "./sqlite-adapter.js";
 import type { LocalSandboxClient } from "../sandbox/local-client.js";
 import type { LocalSessionIndexStore } from "../db/session-index-local.js";
+import type { CredentialStore } from "../credentials/credential-store.js";
 
 import fs from "fs";
 
@@ -19,13 +20,16 @@ export class SessionManager {
   private sessions = new Map<string, SessionInstance>();
   private sandboxClient: LocalSandboxClient;
   private sessionIndex: LocalSessionIndexStore;
+  private credentialStore: CredentialStore;
 
   constructor(
     sandboxClient: LocalSandboxClient,
-    sessionIndex: LocalSessionIndexStore
+    sessionIndex: LocalSessionIndexStore,
+    credentialStore: CredentialStore
   ) {
     this.sandboxClient = sandboxClient;
     this.sessionIndex = sessionIndex;
+    this.credentialStore = credentialStore;
 
     // Ensure data directory exists
     const sessionDir = path.join(config.DATA_DIR, "sessions");
@@ -52,11 +56,7 @@ export class SessionManager {
   }
 
   private createInstance(sessionId: string): SessionInstance {
-    const dbPath = path.join(
-      config.DATA_DIR,
-      "sessions",
-      `${sessionId}.db`
-    );
+    const dbPath = path.join(config.DATA_DIR, "sessions", `${sessionId}.db`);
     const db = new Database(dbPath);
     db.pragma("journal_mode = WAL");
     db.pragma("busy_timeout = 5000");
@@ -68,7 +68,8 @@ export class SessionManager {
       sql,
       this.sandboxClient,
       this.sessionIndex,
-      config
+      config,
+      this.credentialStore
     );
   }
 }

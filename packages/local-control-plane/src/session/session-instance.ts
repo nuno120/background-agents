@@ -21,6 +21,7 @@ import { generateInternalToken } from "@open-inspect/shared";
 import type { SqlStorage } from "./sqlite-adapter.js";
 import type { LocalSandboxClient } from "../sandbox/local-client.js";
 import type { LocalSessionIndexStore } from "../db/session-index-local.js";
+import type { CredentialStore } from "../credentials/credential-store.js";
 import { NodeWebSocketManager, type ClientInfo } from "./websocket-manager-node.js";
 
 // We re-use the original session schema and repository since they depend only on SqlStorage.
@@ -172,6 +173,7 @@ export class SessionInstance {
   private agentModels: Record<string, string> | null = null;
   private agentFiles: Record<string, string> | null = null;
   private modelChains: Record<string, Array<{ provider: string; model: string }>> | null = null;
+  private credentialStore: CredentialStore | null = null;
   private lastSuccessfulLlmCall: number | null = null;
   private lastLlmCallAttempt: number | null = null;
   private llmCallAttemptCount = 0;
@@ -183,7 +185,8 @@ export class SessionInstance {
     sql: SqlStorage,
     sandboxClient: LocalSandboxClient,
     sessionIndex: LocalSessionIndexStore,
-    appConfig: any
+    appConfig: any,
+    credentialStore?: CredentialStore
   ) {
     this.sql = sql;
     this.log = createLog(sessionId);
@@ -191,6 +194,7 @@ export class SessionInstance {
     this.sandboxClient = sandboxClient;
     this.sessionIndex = sessionIndex;
     this.config = appConfig;
+    this.credentialStore = credentialStore ?? null;
     this.ensureInitialized();
   }
 
@@ -310,11 +314,22 @@ export class SessionInstance {
     this.scheduleAlarm(now + Math.min(inactivityTimeoutMs, 60_000));
   }
 
+  /** Invalidate all proxy keys for this session (git + LLM). Idempotent. */
+  private destroyCredentials(): void {
+    if (this.credentialStore) {
+      this.credentialStore.destroy(this.sessionId);
+      this.log.info("Credentials destroyed");
+    }
+  }
+
   /**
    * Destroy (stop + remove) the sandbox container via sandbox-manager.
    * Non-fatal: logs errors but doesn't throw.
    */
   private async destroySandboxContainer(): Promise<void> {
+    // Invalidate proxy keys before destroying container
+    this.destroyCredentials();
+
     const sandbox = this.getSandbox();
     if (!sandbox?.modal_sandbox_id) return;
 
@@ -896,6 +911,9 @@ export class SessionInstance {
             });
           });
         }
+
+        // Invalidate proxy keys — sandbox is done, no more git/LLM access needed
+        this.destroyCredentials();
 
         this.broadcast({ type: "sandbox_event", event });
         this.broadcast({ type: "processing_status", isProcessing: false });
