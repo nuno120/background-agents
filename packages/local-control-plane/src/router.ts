@@ -401,14 +401,109 @@ export function setupRoutes(
   // ── PR creation (from sandbox) ──────────────────────────────────────
 
   app.post("/sessions/:id/pr", async (req, res) => {
+    const sessionId = req.params.id;
     const body = req.body;
-    if (!body.title || !body.body) {
-      errorResponse(res, "title and body are required");
+    if (!body.title || !body.body || !body.head || !body.base) {
+      errorResponse(res, "title, body, head, and base are required");
       return;
     }
-    // PR creation would normally go through the session DO;
-    // for now, return a placeholder acknowledging the request.
-    jsonResponse(res, { status: "pr_creation_not_implemented" }, 501);
+
+    // Look up git credentials from the credential store
+    if (!credentialStore) {
+      errorResponse(res, "Credential store not available", 500);
+      return;
+    }
+
+    const proxyKeys = credentialStore.getProxyKeys(sessionId);
+    if (!proxyKeys?.gitProxyKey) {
+      errorResponse(res, "No git credentials for this session", 403);
+      return;
+    }
+
+    const creds = credentialStore.getByGitProxyKey(proxyKeys.gitProxyKey);
+    if (!creds) {
+      errorResponse(res, "Git credentials not found", 403);
+      return;
+    }
+
+    // Determine the git host and create PR accordingly
+    const repoPath = creds.authorizedRepo || body.repo;
+    if (!repoPath) {
+      errorResponse(res, "Cannot determine target repository");
+      return;
+    }
+
+    const [owner, repo] = repoPath.split("/");
+    const isGitHub = creds.provider === "github" || creds.url.includes("github.com");
+
+    try {
+      let prUrl: string;
+      let prNumber: number;
+
+      if (isGitHub) {
+        // GitHub API: create pull request
+        const ghResp = await fetch(`https://api.github.com/repos/${owner}/${repo}/pulls`, {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${creds.password}`,
+            Accept: "application/vnd.github+json",
+            "X-GitHub-Api-Version": "2022-11-28",
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            title: body.title,
+            body: body.body,
+            head: body.head,
+            base: body.base,
+          }),
+        });
+
+        if (!ghResp.ok) {
+          const errText = await ghResp.text();
+          console.error(`[pr] GitHub PR creation failed: ${ghResp.status} ${errText}`);
+          errorResponse(res, `GitHub API error: ${ghResp.status}`, ghResp.status);
+          return;
+        }
+
+        const prData = (await ghResp.json()) as { number: number; html_url: string };
+        prNumber = prData.number;
+        prUrl = prData.html_url;
+      } else {
+        // Gitea API: create pull request
+        const giteaBase = creds.url.replace(/\/$/, "");
+        const giteaResp = await fetch(`${giteaBase}/api/v1/repos/${owner}/${repo}/pulls`, {
+          method: "POST",
+          headers: {
+            Authorization: `Basic ${Buffer.from(`${creds.username}:${creds.password}`).toString("base64")}`,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            title: body.title,
+            body: body.body,
+            head: body.head,
+            base: body.base,
+          }),
+        });
+
+        if (!giteaResp.ok) {
+          const errText = await giteaResp.text();
+          console.error(`[pr] Gitea PR creation failed: ${giteaResp.status} ${errText}`);
+          errorResponse(res, `Gitea API error: ${giteaResp.status}`, giteaResp.status);
+          return;
+        }
+
+        const prData = (await giteaResp.json()) as { number: number; html_url: string };
+        prNumber = prData.number;
+        prUrl = prData.html_url;
+      }
+
+      console.log(`[pr] PR #${prNumber} created: ${prUrl}`);
+      jsonResponse(res, { status: "created", prNumber, prUrl });
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : String(error);
+      console.error(`[pr] Error creating PR: ${msg}`);
+      errorResponse(res, "Failed to create pull request", 500);
+    }
   });
 
   // ── OpenAI token refresh (from sandbox) ─────────────────────────────
