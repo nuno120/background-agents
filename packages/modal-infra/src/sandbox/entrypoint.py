@@ -290,6 +290,14 @@ class SandboxSupervisor:
         if self.repo_path.exists() and (self.repo_path / ".git").exists():
             workdir = self.repo_path
 
+        # Exclude .opencode/ from git so OpenCode never commits it
+        git_exclude = workdir / ".git" / "info" / "exclude"
+        if git_exclude.parent.exists():
+            exclude_text = git_exclude.read_text() if git_exclude.exists() else ""
+            if ".opencode/" not in exclude_text:
+                with open(git_exclude, "a") as f:
+                    f.write("\n.opencode/\n")
+
         # Set up .opencode directory for custom tools
         opencode_dir = workdir / ".opencode"
         tool_dest = opencode_dir / "tool"
