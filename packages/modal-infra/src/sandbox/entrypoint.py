@@ -120,8 +120,6 @@ class SandboxSupervisor:
             result = await asyncio.create_subprocess_exec(
                 "git",
                 "clone",
-                "--depth",
-                "1",
                 clone_url,
                 str(self.repo_path),
                 stdout=asyncio.subprocess.PIPE,
