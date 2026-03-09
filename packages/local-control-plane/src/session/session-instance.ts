@@ -1092,13 +1092,6 @@ export class SessionInstance {
       }
       if (this.githubApiProxyKey) {
         userEnvVars["GITHUB_API_PROXY_URL"] = `${controlPlaneUrl}/github-api-proxy/${this.githubApiProxyKey}`;
-        // Pass the real token as GH_TOKEN for gh CLI (which requires HTTPS and can't
-        // use our HTTP proxy). The token is short-lived (1 hour) and sandbox-scoped.
-        // Note: entrypoint.py strips GITHUB_TOKEN but NOT GH_TOKEN.
-        const ghCreds = this.credentialStore?.getByGithubApiProxyKey(this.githubApiProxyKey);
-        if (ghCreds?.token) {
-          userEnvVars["GH_TOKEN"] = ghCreds.token;
-        }
       }
       if (this.availableLlmProviders.length > 0) {
         userEnvVars["AVAILABLE_LLM_PROVIDERS"] = JSON.stringify(this.availableLlmProviders);
@@ -1189,10 +1182,6 @@ export class SessionInstance {
       }
       if (this.githubApiProxyKey) {
         userEnvVars["GITHUB_API_PROXY_URL"] = `${controlPlaneUrl}/github-api-proxy/${this.githubApiProxyKey}`;
-        const ghCreds = this.credentialStore?.getByGithubApiProxyKey(this.githubApiProxyKey);
-        if (ghCreds?.token) {
-          userEnvVars["GH_TOKEN"] = ghCreds.token;
-        }
       }
       if (this.availableLlmProviders.length > 0) {
         userEnvVars["AVAILABLE_LLM_PROVIDERS"] = JSON.stringify(this.availableLlmProviders);
