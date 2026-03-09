@@ -17,6 +17,7 @@ export interface GitCredentials {
   url: string; // e.g. "http://gitea:3000"
   username: string;
   password: string;
+  authorizedRepo?: string; // "owner/repo" — enforced by git proxy
 }
 
 export interface LlmCredentials {
