@@ -265,9 +265,71 @@ class SandboxSupervisor:
         except Exception as e:
             self.log.warn("openai_oauth.setup_error", exc=e)
 
+    def _setup_gh_wrapper(self) -> None:
+        """Replace gh CLI with a wrapper that explains how to use the GitHub API proxy.
+
+        The real gh CLI cannot work in the sandbox because:
+        - Git remotes point to our proxy, not github.com (gh can't detect the repo)
+        - gh hardcodes HTTPS to api.github.com (can't redirect to our HTTP proxy)
+
+        This wrapper gives the agent clear instructions to use curl instead.
+        """
+        github_api_url = os.environ.get("GITHUB_API_PROXY_URL", "")
+        if not github_api_url:
+            return
+
+        owner = self.repo_owner
+        repo = self.repo_name
+
+        wrapper = f"""#!/bin/bash
+echo ""
+echo "ERROR: gh CLI is not available in this sandbox environment."
+echo ""
+echo "Use curl with \\$GITHUB_API_PROXY_URL instead. Examples:"
+echo ""
+echo "  # View a pull request"
+echo "  curl -s \\$GITHUB_API_PROXY_URL/repos/{owner}/{repo}/pulls/NUMBER | jq"
+echo ""
+echo "  # List open pull requests"
+echo "  curl -s \\$GITHUB_API_PROXY_URL/repos/{owner}/{repo}/pulls | jq"
+echo ""
+echo "  # Create a pull request"
+echo "  curl -s -X POST \\$GITHUB_API_PROXY_URL/repos/{owner}/{repo}/pulls \\\\"
+echo "    -H 'Content-Type: application/json' \\\\"
+echo "    -d '{{\\"title\\":\\"..\\",\\"body\\":\\"..\\",\\"head\\":\\"branch\\",\\"base\\":\\"main\\"}}'"
+echo ""
+echo "  # View PR comments"
+echo "  curl -s \\$GITHUB_API_PROXY_URL/repos/{owner}/{repo}/pulls/NUMBER/comments | jq"
+echo ""
+echo "  # View PR diff"
+echo "  curl -s -H 'Accept: application/vnd.github.diff' \\\\"
+echo "    \\$GITHUB_API_PROXY_URL/repos/{owner}/{repo}/pulls/NUMBER"
+echo ""
+echo "  # List issues"
+echo "  curl -s \\$GITHUB_API_PROXY_URL/repos/{owner}/{repo}/issues | jq"
+echo ""
+echo "  # View repo info"
+echo "  curl -s \\$GITHUB_API_PROXY_URL/repos/{owner}/{repo} | jq"
+echo ""
+echo "  # Any GitHub REST API endpoint"
+echo "  curl -s \\$GITHUB_API_PROXY_URL/<endpoint> | jq"
+echo ""
+echo "Authentication is handled automatically by the proxy."
+echo ""
+exit 1
+"""
+        wrapper_path = Path("/usr/local/bin/gh")
+        try:
+            wrapper_path.write_text(wrapper)
+            wrapper_path.chmod(0o755)
+            self.log.info("gh_wrapper.installed")
+        except Exception as e:
+            self.log.warn("gh_wrapper.install_error", exc=e)
+
     async def start_opencode(self) -> None:
         """Start OpenCode server with configuration."""
         self._setup_openai_oauth()
+        self._setup_gh_wrapper()
         self.log.info("opencode.start")
 
         # Build OpenCode config from session settings
