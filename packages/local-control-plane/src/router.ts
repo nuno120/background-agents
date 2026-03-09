@@ -38,7 +38,7 @@ interface RouteContext {
 
 // ── Auth ─────────────────────────────────────────────────────────────────
 
-const PUBLIC_ROUTES: RegExp[] = [/^\/health$/, /^\/git-proxy\//, /^\/llm-proxy\//];
+const PUBLIC_ROUTES: RegExp[] = [/^\/health$/, /^\/git-proxy\//, /^\/github-api-proxy\//, /^\/llm-proxy\//];
 
 const SANDBOX_AUTH_ROUTES: RegExp[] = [
   /^\/sessions\/[^/]+\/pr$/,

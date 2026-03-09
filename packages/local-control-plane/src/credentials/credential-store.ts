@@ -26,14 +26,21 @@ export interface LlmCredentials {
   baseUrl: string; // e.g. "https://open.bigmodel.cn/api/paas/v4"
 }
 
+export interface GithubApiCredentials {
+  token: string; // GitHub App installation token
+  authorizedRepo?: string; // "owner/repo" — for logging/scoping
+}
+
 export interface SessionCredentials {
   git?: GitCredentials;
   llm?: LlmCredentials | LlmCredentials[];
+  githubApi?: GithubApiCredentials;
 }
 
 export interface ProxyKeys {
   gitProxyKey: string | null;
   llmProxyKey: string | null;
+  githubApiProxyKey: string | null;
 }
 
 /** Model chain entry for proxy failover. */
@@ -47,8 +54,10 @@ interface StoredSession {
   gitCredentials: GitCredentials | null;
   /** provider name -> LlmCredentials (multi-provider support) */
   llmCredentials: Map<string, LlmCredentials>;
+  githubApiCredentials: GithubApiCredentials | null;
   gitProxyKey: string | null;
   llmProxyKey: string | null;
+  githubApiProxyKey: string | null;
   /** Model chains for proxy failover — keyed by model string */
   modelChains: Record<string, ModelChainEntry[]> | null;
 }
@@ -62,6 +71,8 @@ export class CredentialStore {
   private gitKeyIndex = new Map<string, string>();
   /** llmProxyKey -> sessionId (reverse index) */
   private llmKeyIndex = new Map<string, string>();
+  /** githubApiProxyKey -> sessionId (reverse index) */
+  private githubApiKeyIndex = new Map<string, string>();
 
   /**
    * Store credentials for a session and generate proxy keys.
@@ -90,13 +101,18 @@ export class CredentialStore {
     }
 
     const llmProxyKey = llmMap.size > 0 ? crypto.randomBytes(32).toString("hex") : null;
+    const githubApiProxyKey = credentials.githubApi?.token
+      ? crypto.randomBytes(32).toString("hex")
+      : null;
 
     const stored: StoredSession = {
       sessionId,
       gitCredentials: credentials.git ?? null,
       llmCredentials: llmMap,
+      githubApiCredentials: credentials.githubApi ?? null,
       gitProxyKey,
       llmProxyKey,
+      githubApiProxyKey,
       modelChains: modelChains ?? null,
     };
 
@@ -108,8 +124,11 @@ export class CredentialStore {
     if (llmProxyKey) {
       this.llmKeyIndex.set(llmProxyKey, sessionId);
     }
+    if (githubApiProxyKey) {
+      this.githubApiKeyIndex.set(githubApiProxyKey, sessionId);
+    }
 
-    return { gitProxyKey, llmProxyKey };
+    return { gitProxyKey, llmProxyKey, githubApiProxyKey };
   }
 
   /** Look up git credentials by proxy key. Returns null if key is invalid. */
@@ -121,6 +140,17 @@ export class CredentialStore {
     if (!stored?.gitCredentials) return null;
 
     return { ...stored.gitCredentials, sessionId };
+  }
+
+  /** Look up GitHub API credentials by proxy key. Returns null if key is invalid. */
+  getByGithubApiProxyKey(key: string): (GithubApiCredentials & { sessionId: string }) | null {
+    const sessionId = this.githubApiKeyIndex.get(key);
+    if (!sessionId) return null;
+
+    const stored = this.sessions.get(sessionId);
+    if (!stored?.githubApiCredentials) return null;
+
+    return { ...stored.githubApiCredentials, sessionId };
   }
 
   /**
@@ -155,6 +185,7 @@ export class CredentialStore {
     return {
       gitProxyKey: stored.gitProxyKey,
       llmProxyKey: stored.llmProxyKey,
+      githubApiProxyKey: stored.githubApiProxyKey,
     };
   }
 
@@ -168,6 +199,9 @@ export class CredentialStore {
     }
     if (stored.llmProxyKey) {
       this.llmKeyIndex.delete(stored.llmProxyKey);
+    }
+    if (stored.githubApiProxyKey) {
+      this.githubApiKeyIndex.delete(stored.githubApiProxyKey);
     }
 
     this.sessions.delete(sessionId);

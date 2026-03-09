@@ -169,6 +169,7 @@ export class SessionInstance {
   private isSpawningSandbox = false;
   private gitProxyKey: string | null = null;
   private llmProxyKey: string | null = null;
+  private githubApiProxyKey: string | null = null;
   private availableLlmProviders: string[] = [];
   private agentModels: Record<string, string> | null = null;
   private agentFiles: Record<string, string> | null = null;
@@ -1089,6 +1090,16 @@ export class SessionInstance {
       if (this.llmProxyKey) {
         userEnvVars["LLM_PROXY_URL"] = `${controlPlaneUrl}/llm-proxy/${this.llmProxyKey}`;
       }
+      if (this.githubApiProxyKey) {
+        userEnvVars["GITHUB_API_PROXY_URL"] = `${controlPlaneUrl}/github-api-proxy/${this.githubApiProxyKey}`;
+        // Pass the real token as GH_TOKEN for gh CLI (which requires HTTPS and can't
+        // use our HTTP proxy). The token is short-lived (1 hour) and sandbox-scoped.
+        // Note: entrypoint.py strips GITHUB_TOKEN but NOT GH_TOKEN.
+        const ghCreds = this.credentialStore?.getByGithubApiProxyKey(this.githubApiProxyKey);
+        if (ghCreds?.token) {
+          userEnvVars["GH_TOKEN"] = ghCreds.token;
+        }
+      }
       if (this.availableLlmProviders.length > 0) {
         userEnvVars["AVAILABLE_LLM_PROVIDERS"] = JSON.stringify(this.availableLlmProviders);
       }
@@ -1175,6 +1186,13 @@ export class SessionInstance {
       const userEnvVars: Record<string, string> = {};
       if (this.llmProxyKey) {
         userEnvVars["LLM_PROXY_URL"] = `${controlPlaneUrl}/llm-proxy/${this.llmProxyKey}`;
+      }
+      if (this.githubApiProxyKey) {
+        userEnvVars["GITHUB_API_PROXY_URL"] = `${controlPlaneUrl}/github-api-proxy/${this.githubApiProxyKey}`;
+        const ghCreds = this.credentialStore?.getByGithubApiProxyKey(this.githubApiProxyKey);
+        if (ghCreds?.token) {
+          userEnvVars["GH_TOKEN"] = ghCreds.token;
+        }
       }
       if (this.availableLlmProviders.length > 0) {
         userEnvVars["AVAILABLE_LLM_PROVIDERS"] = JSON.stringify(this.availableLlmProviders);
@@ -1356,6 +1374,7 @@ export class SessionInstance {
     if (body.proxyKeys) {
       this.gitProxyKey = body.proxyKeys.gitProxyKey ?? null;
       this.llmProxyKey = body.proxyKeys.llmProxyKey ?? null;
+      this.githubApiProxyKey = body.proxyKeys.githubApiProxyKey ?? null;
     }
 
     // Store available LLM providers for multi-provider sandbox config
