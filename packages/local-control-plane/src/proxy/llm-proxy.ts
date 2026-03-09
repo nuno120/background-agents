@@ -221,27 +221,11 @@ async function attemptStreamingRequest(
 
       if (
         upstreamRes.statusCode &&
-        (upstreamRes.statusCode >= 500 || upstreamRes.statusCode === 429)
+        (upstreamRes.statusCode < 200 || upstreamRes.statusCode >= 300)
       ) {
-        // 5xx or 429 (rate limit) BEFORE headers sent — can retry with failover
+        // Any non-2xx — retry with next provider in chain
         upstreamRes.resume();
         upstreamRes.on("end", () => resolve("failed_before_headers"));
-        return;
-      }
-
-      if (upstreamRes.statusCode && upstreamRes.statusCode >= 400) {
-        // 4xx (except 429) — forward error, no retry
-        const errorChunks: Buffer[] = [];
-        upstreamRes.on("data", (chunk: Buffer) => errorChunks.push(chunk));
-        upstreamRes.on("end", () => {
-          const errorBody = Buffer.concat(errorChunks).toString().slice(0, 500);
-          console.error(`[llm-proxy] ${provider} upstream error body: ${errorBody}`);
-          res.writeHead(upstreamRes.statusCode || 502, {
-            "Content-Type": upstreamRes.headers["content-type"] || "application/json",
-          });
-          res.end(Buffer.concat(errorChunks));
-          resolve("success"); // Not a server error, don't retry
-        });
         return;
       }
 
@@ -568,7 +552,7 @@ async function handleRequestWithFailover(
         attemptBody,
         attempt.provider
       );
-      const isRetryable = result.status >= 500 || result.status === 429;
+      const isRetryable = result.status < 200 || result.status >= 300;
 
       trackLlmResult(proxyKey, attempt.provider, !isRetryable, credentialStore, callbacks);
 
