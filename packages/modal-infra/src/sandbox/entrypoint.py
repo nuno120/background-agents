@@ -779,14 +779,13 @@ class SandboxSupervisor:
             # Create storage directory
             os.makedirs("/var/lib/docker", exist_ok=True)
 
-            # Start dockerd in background, redirect output to /dev/null to
-            # prevent pipe buffer from filling up and blocking the daemon
-            devnull = open(os.devnull, "w")
+            # Start dockerd in background, discard output to prevent pipe
+            # buffer from filling up and blocking the daemon
             self.dockerd_process = await asyncio.create_subprocess_exec(
                 "dockerd",
                 "--storage-driver=overlay2",
-                stdout=devnull,
-                stderr=devnull,
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.DEVNULL,
             )
 
             # Wait for Docker socket (up to 10s)
