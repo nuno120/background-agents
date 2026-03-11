@@ -171,7 +171,7 @@ export class SessionInstance {
   private llmProxyKey: string | null = null;
   private availableLlmProviders: string[] = [];
   private agentModels: Record<string, string> | null = null;
-  private agentFiles: Record<string, string> | null = null;
+  private opencodeFiles: Record<string, string> | null = null;
   private modelChains: Record<string, Array<{ provider: string; model: string }>> | null = null;
   private credentialStore: CredentialStore | null = null;
   private lastSuccessfulLlmCall: number | null = null;
@@ -1095,8 +1095,8 @@ export class SessionInstance {
       if (this.agentModels) {
         userEnvVars["SANDBOX_AGENT_MODELS"] = JSON.stringify(this.agentModels);
       }
-      if (this.agentFiles) {
-        userEnvVars["SANDBOX_AGENT_FILES"] = JSON.stringify(this.agentFiles);
+      if (this.opencodeFiles) {
+        userEnvVars["SANDBOX_OPENCODE_FILES"] = JSON.stringify(this.opencodeFiles);
       }
       if (this.modelChains) {
         userEnvVars["SANDBOX_MODEL_CHAINS"] = JSON.stringify(this.modelChains);
@@ -1182,8 +1182,8 @@ export class SessionInstance {
       if (this.agentModels) {
         userEnvVars["SANDBOX_AGENT_MODELS"] = JSON.stringify(this.agentModels);
       }
-      if (this.agentFiles) {
-        userEnvVars["SANDBOX_AGENT_FILES"] = JSON.stringify(this.agentFiles);
+      if (this.opencodeFiles) {
+        userEnvVars["SANDBOX_OPENCODE_FILES"] = JSON.stringify(this.opencodeFiles);
       }
       if (this.modelChains) {
         userEnvVars["SANDBOX_MODEL_CHAINS"] = JSON.stringify(this.modelChains);
@@ -1365,7 +1365,7 @@ export class SessionInstance {
 
     // Store per-agent model overrides and agent definition files
     this.agentModels = body.agentModels ?? null;
-    this.agentFiles = body.agentFiles ?? null;
+    this.opencodeFiles = body.opencodeFiles ?? null;
     this.modelChains = body.modelChains ?? null;
 
     // Trigger warm sandbox

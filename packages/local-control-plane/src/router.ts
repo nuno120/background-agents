@@ -183,7 +183,7 @@ export function setupRoutes(
       proxyKeys: proxyKeys ?? undefined,
       availableLlmProviders,
       agentModels: body.agentModels ?? null,
-      agentFiles: body.agentFiles ?? null,
+      opencodeFiles: body.opencodeFiles ?? body.agentFiles ?? null,
       modelChains: body.modelChains ?? null,
     });
 
