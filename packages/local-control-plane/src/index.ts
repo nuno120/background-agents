@@ -16,6 +16,7 @@ import { createLocalSandboxClient } from "./sandbox/local-client.js";
 import { LocalSessionIndexStore } from "./db/session-index-local.js";
 import { CredentialStore } from "./credentials/credential-store.js";
 import { setupGitProxy } from "./proxy/git-proxy.js";
+import { setupGithubApiProxy } from "./proxy/github-api-proxy.js";
 import { setupLlmProxy } from "./proxy/llm-proxy.js";
 import { setupRoutes } from "./router.js";
 import fs from "fs";
@@ -44,15 +45,16 @@ const sessionManager = new SessionManager(sandboxClient, sessionIndex, credentia
 // ── Express app ──────────────────────────────────────────────────────────
 
 const app = express();
-// JSON body parser — skip /llm-proxy/ paths (they use their own raw body parser
+// JSON body parser — skip proxy paths (they use their own raw body parsers
 // to support streaming passthrough; express.json() would consume the body stream).
 app.use((req, res, next) => {
-  if (req.path.startsWith("/llm-proxy/")) return next();
+  if (req.path.startsWith("/llm-proxy/") || req.path.startsWith("/github-api-proxy/")) return next();
   express.json({ limit: "10mb" })(req, res, next);
 });
 
 // Set up proxy routes BEFORE auth middleware (proxy key IS the auth)
 setupGitProxy(app, credentialStore);
+setupGithubApiProxy(app, credentialStore);
 setupLlmProxy(app, credentialStore, {
   onProviderUnhealthy: (sessionId, provider, errorCount) => {
     try {

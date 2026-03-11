@@ -169,6 +169,7 @@ export class SessionInstance {
   private isSpawningSandbox = false;
   private gitProxyKey: string | null = null;
   private llmProxyKey: string | null = null;
+  private githubApiProxyKey: string | null = null;
   private availableLlmProviders: string[] = [];
   private agentModels: Record<string, string> | null = null;
   private opencodeFiles: Record<string, string> | null = null;
@@ -1089,6 +1090,9 @@ export class SessionInstance {
       if (this.llmProxyKey) {
         userEnvVars["LLM_PROXY_URL"] = `${controlPlaneUrl}/llm-proxy/${this.llmProxyKey}`;
       }
+      if (this.githubApiProxyKey) {
+        userEnvVars["GITHUB_API_PROXY_URL"] = `${controlPlaneUrl}/github-api-proxy/${this.githubApiProxyKey}`;
+      }
       if (this.availableLlmProviders.length > 0) {
         userEnvVars["AVAILABLE_LLM_PROVIDERS"] = JSON.stringify(this.availableLlmProviders);
       }
@@ -1175,6 +1179,9 @@ export class SessionInstance {
       const userEnvVars: Record<string, string> = {};
       if (this.llmProxyKey) {
         userEnvVars["LLM_PROXY_URL"] = `${controlPlaneUrl}/llm-proxy/${this.llmProxyKey}`;
+      }
+      if (this.githubApiProxyKey) {
+        userEnvVars["GITHUB_API_PROXY_URL"] = `${controlPlaneUrl}/github-api-proxy/${this.githubApiProxyKey}`;
       }
       if (this.availableLlmProviders.length > 0) {
         userEnvVars["AVAILABLE_LLM_PROVIDERS"] = JSON.stringify(this.availableLlmProviders);
@@ -1356,6 +1363,7 @@ export class SessionInstance {
     if (body.proxyKeys) {
       this.gitProxyKey = body.proxyKeys.gitProxyKey ?? null;
       this.llmProxyKey = body.proxyKeys.llmProxyKey ?? null;
+      this.githubApiProxyKey = body.proxyKeys.githubApiProxyKey ?? null;
     }
 
     // Store available LLM providers for multi-provider sandbox config
