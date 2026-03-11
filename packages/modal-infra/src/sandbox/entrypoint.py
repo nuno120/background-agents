@@ -280,6 +280,9 @@ class SandboxSupervisor:
                 "*": {
                     "*": "allow",
                 },
+                "skill": {
+                    "*": "allow",
+                },
             },
         }
 
@@ -329,18 +332,20 @@ class SandboxSupervisor:
             shutil.copy(plugin_source, plugin_dir / "codex-auth-plugin.ts")
             self.log.info("openai_oauth.plugin_deployed")
 
-        # Deploy agent definition .md files into .opencode/agents/
-        agent_files_json = os.environ.get("SANDBOX_AGENT_FILES", "")
-        agent_files = json.loads(agent_files_json) if agent_files_json else {}
-        if agent_files:
-            agents_dir = opencode_dir / "agents"
-            agents_dir.mkdir(parents=True, exist_ok=True)
-            for name, content in agent_files.items():
-                (agents_dir / f"{name}.md").write_text(content)
+        # Deploy OpenCode files (.opencode/{key}.md) — agents, skills, etc.
+        opencode_files_json = os.environ.get("SANDBOX_OPENCODE_FILES") or os.environ.get(
+            "SANDBOX_AGENT_FILES", ""
+        )
+        opencode_files = json.loads(opencode_files_json) if opencode_files_json else {}
+        if opencode_files:
+            for key, content in opencode_files.items():
+                target = opencode_dir / f"{key}.md"
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_text(content)
             self.log.info(
-                "opencode.agent_files_deployed",
-                count=len(agent_files),
-                agents=list(agent_files.keys()),
+                "opencode.files_deployed",
+                count=len(opencode_files),
+                keys=list(opencode_files.keys()),
             )
 
         # Parse per-agent model overrides
