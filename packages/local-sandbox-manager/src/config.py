@@ -41,7 +41,7 @@ CONTAINERD_NAMESPACE = get("CONTAINERD_NAMESPACE", "default")
 # ── Docker-specific settings ──────────────────────────────────────────────
 DOCKER_MEMORY_LIMIT = get("DOCKER_MEMORY_LIMIT", "4g")
 DOCKER_CPU_LIMIT = get("DOCKER_CPU_LIMIT", "2")
-DOCKER_PIDS_LIMIT = int(get("DOCKER_PIDS_LIMIT", "4096"))
+DOCKER_PIDS_LIMIT = int(get("DOCKER_PIDS_LIMIT", "8192"))
 DOCKER_NETWORK = get("DOCKER_NETWORK")
 
 # Snapshot storage directory.

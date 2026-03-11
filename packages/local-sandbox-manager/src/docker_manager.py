@@ -5,11 +5,14 @@ Cross-platform alternative to KataContainerManager. Works on Linux, Windows,
 and macOS wherever Docker (or Docker Desktop) is installed.
 
 Security hardening:
-  - --security-opt=no-new-privileges  (blocks setuid/setgid escalation)
-  - --cap-drop=ALL + minimal cap-add  (principle of least privilege)
-  - --memory limit                    (prevents OOM on host)
-  - --pids-limit                      (prevents fork bombs)
-  - Default seccomp + AppArmor        (Docker builtin profiles)
+  - --cap-drop=ALL + targeted cap-add   (principle of least privilege)
+  - SYS_ADMIN + MKNOD for DinD          (builder verification)
+  - --cgroupns=host for DinD on cgroup v2
+  - no-new-privileges removed            (incompatible with DinD containerd-shim)
+  - --memory limit                       (prevents OOM on host)
+  - --pids-limit                         (prevents fork bombs)
+  - Default seccomp + AppArmor           (Docker builtin profiles)
+  - Network isolation                    (sandbox-only network)
   - No --privileged
 """
 
@@ -73,10 +76,11 @@ class DockerContainerManager:
             env_flags.extend(["-e", f"{k}={v}"])
 
         # Security and resource flags
+        # Note: DinD requires SYS_ADMIN + MKNOD and is incompatible with
+        # no-new-privileges (containerd-shim needs privilege escalation).
+        # Compensating controls: cap-drop=ALL, network isolation, resource limits.
         security_flags = [
-            # Prevent setuid/setgid privilege escalation
-            "--security-opt=no-new-privileges",
-            # Drop ALL capabilities, add back only essentials
+            # Drop ALL capabilities, add back only essentials + DinD
             "--cap-drop=ALL",
             "--cap-add=CHOWN",         # chown files (npm, git)
             "--cap-add=DAC_OVERRIDE",  # bypass file permission checks (root in container)
@@ -86,6 +90,9 @@ class DockerContainerManager:
             "--cap-add=NET_RAW",       # raw sockets (ping, health checks)
             "--cap-add=NET_BIND_SERVICE",  # bind ports < 1024
             "--cap-add=SYS_CHROOT",    # chroot (some build tools)
+            "--cap-add=SYS_ADMIN",     # Docker-in-Docker (cgroups/namespaces)
+            "--cap-add=MKNOD",         # Device nodes (DinD)
+            "--cgroupns=host",         # Share host cgroup namespace (required for DinD on cgroup v2)
             # Resource limits
             f"--memory={config.DOCKER_MEMORY_LIMIT}",
             f"--cpus={config.DOCKER_CPU_LIMIT}",
