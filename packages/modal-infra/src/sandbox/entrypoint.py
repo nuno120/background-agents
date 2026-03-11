@@ -49,6 +49,7 @@ class SandboxSupervisor:
     def __init__(self):
         self.opencode_process: asyncio.subprocess.Process | None = None
         self.bridge_process: asyncio.subprocess.Process | None = None
+        self.dockerd_process: asyncio.subprocess.Process | None = None
         self.shutdown_event = asyncio.Event()
         self.git_sync_complete = asyncio.Event()
         self.opencode_ready = asyncio.Event()
@@ -751,6 +752,71 @@ class SandboxSupervisor:
             self.log.error("setup.error", exc=e, script=str(setup_script))
             return False
 
+    async def start_dockerd(self) -> bool:
+        """
+        Start Docker daemon for Docker-in-Docker (builder verification).
+
+        Non-fatal: if Docker can't start (e.g. missing SYS_ADMIN cap), log a
+        warning and continue — builder falls back to test-only verification.
+
+        Returns:
+            True if dockerd started successfully, False otherwise.
+        """
+        # Check if Docker is installed
+        check = await asyncio.create_subprocess_exec(
+            "which", "dockerd",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        await check.communicate()
+        if check.returncode != 0:
+            self.log.debug("dockerd.skip", reason="not_installed")
+            return False
+
+        self.log.info("dockerd.start")
+
+        try:
+            # Create storage directory
+            os.makedirs("/var/lib/docker", exist_ok=True)
+
+            # Start dockerd in background, redirect output to /dev/null to
+            # prevent pipe buffer from filling up and blocking the daemon
+            devnull = open(os.devnull, "w")
+            self.dockerd_process = await asyncio.create_subprocess_exec(
+                "dockerd",
+                "--storage-driver=overlay2",
+                stdout=devnull,
+                stderr=devnull,
+            )
+
+            # Wait for Docker socket (up to 10s)
+            socket_path = "/var/run/docker.sock"
+            for _ in range(20):
+                if os.path.exists(socket_path):
+                    # Verify docker info works
+                    info = await asyncio.create_subprocess_exec(
+                        "docker", "info",
+                        stdout=asyncio.subprocess.PIPE,
+                        stderr=asyncio.subprocess.PIPE,
+                    )
+                    await asyncio.wait_for(info.communicate(), timeout=5)
+                    if info.returncode == 0:
+                        self.log.info("dockerd.ready")
+                        return True
+                await asyncio.sleep(0.5)
+
+            # Timed out
+            self.log.warn("dockerd.timeout", message="Docker socket not ready after 10s")
+            if self.dockerd_process.returncode is None:
+                self.dockerd_process.terminate()
+            self.dockerd_process = None
+            return False
+
+        except Exception as e:
+            self.log.warn("dockerd.start_error", exc=e)
+            self.dockerd_process = None
+            return False
+
     async def _quick_git_fetch(self) -> None:
         """
         Quick fetch to check if we're behind after snapshot restore.
@@ -883,6 +949,11 @@ class SandboxSupervisor:
             if not restored_from_snapshot:
                 setup_success = await self.run_setup_script()
 
+            # Phase 2.7: Start Docker daemon (DinD) for builder verification
+            dockerd_success: bool | None = None
+            if not restored_from_snapshot:
+                dockerd_success = await self.start_dockerd()
+
             # Phase 3: Start OpenCode server (in repo directory)
             await self.start_opencode()
             opencode_ready = True
@@ -899,6 +970,7 @@ class SandboxSupervisor:
                 restored_from_snapshot=restored_from_snapshot,
                 git_sync_success=git_sync_success,
                 setup_success=setup_success,
+                dockerd_success=dockerd_success,
                 opencode_ready=opencode_ready,
                 duration_ms=duration_ms,
                 outcome="success",
@@ -922,6 +994,25 @@ class SandboxSupervisor:
     async def shutdown(self) -> None:
         """Graceful shutdown of all processes."""
         self.log.info("supervisor.shutdown_start")
+
+        # Stop inner Docker containers and daemon (DinD cleanup)
+        if self.dockerd_process and self.dockerd_process.returncode is None:
+            self.log.info("dockerd.shutdown")
+            try:
+                # Try to stop any running compose projects
+                cleanup = await asyncio.create_subprocess_exec(
+                    "docker", "compose", "down", "-v",
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                )
+                await asyncio.wait_for(cleanup.communicate(), timeout=10)
+            except Exception:
+                pass
+            self.dockerd_process.terminate()
+            try:
+                await asyncio.wait_for(self.dockerd_process.wait(), timeout=5.0)
+            except TimeoutError:
+                self.dockerd_process.kill()
 
         # Terminate bridge first
         if self.bridge_process and self.bridge_process.returncode is None:
