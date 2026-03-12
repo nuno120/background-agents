@@ -485,6 +485,11 @@ class AgentBridge:
             if had_error:
                 outcome = "error"
 
+            # Auto-push any unpushed commits before signalling completion.
+            # The control plane destroys git proxy credentials on execution_complete,
+            # so the push MUST happen before that event is sent.
+            await self._auto_push_if_needed()
+
             await self._send_event(
                 {
                     "type": "execution_complete",
@@ -1407,6 +1412,72 @@ class AgentBridge:
                     "branchName": branch_name,
                 }
             )
+
+    async def _auto_push_if_needed(self) -> None:
+        """Push any unpushed commits before execution_complete destroys credentials."""
+        repo_dirs = list(self.repo_path.glob("*/.git"))
+        if not repo_dirs:
+            self.log.debug("auto_push.skip", reason="no_repository")
+            return
+
+        repo_dir = repo_dirs[0].parent
+
+        try:
+            # Check if there are unpushed commits.
+            check = await asyncio.create_subprocess_exec(
+                "git", "log", "--oneline", "origin/HEAD..HEAD",
+                cwd=repo_dir,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            stdout, stderr = await check.communicate()
+
+            # If the tracking ref doesn't exist, try origin/main.
+            if check.returncode != 0:
+                check = await asyncio.create_subprocess_exec(
+                    "git", "log", "--oneline", "origin/main..HEAD",
+                    cwd=repo_dir,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                )
+                stdout, stderr = await check.communicate()
+
+            if check.returncode != 0:
+                self.log.debug("auto_push.skip", reason="cannot_determine_unpushed")
+                return
+
+            unpushed = stdout.decode().strip()
+            if not unpushed:
+                self.log.debug("auto_push.skip", reason="no_unpushed_commits")
+                return
+
+            commit_count = len(unpushed.splitlines())
+            self.log.info("auto_push.pushing", unpushed_commits=commit_count)
+
+            push = await asyncio.create_subprocess_exec(
+                "git", "push", "origin", "HEAD",
+                cwd=repo_dir,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            push_stdout, push_stderr = await push.communicate()
+
+            if push.returncode != 0:
+                err = push_stderr.decode().strip()
+                self.log.warn("auto_push.failed", error=err)
+                await self._send_event({
+                    "type": "auto_push_error",
+                    "error": err,
+                })
+            else:
+                self.log.info("auto_push.success", commits=commit_count)
+                await self._send_event({
+                    "type": "auto_push_complete",
+                    "commits": commit_count,
+                })
+
+        except Exception as e:
+            self.log.error("auto_push.error", exc=e)
 
     async def _configure_git_identity(self, user: GitUser) -> None:
         """Configure git identity for commit attribution."""
