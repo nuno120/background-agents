@@ -160,6 +160,22 @@ class SandboxSupervisor:
                     stderr=asyncio.subprocess.PIPE,
                 )
 
+            # Configure credential helper so git never prompts interactively.
+            # The git-proxy handles auth server-side (injects Basic auth when
+            # forwarding to upstream), so the client doesn't need real credentials.
+            # Without this, `git push` fails in the headless sandbox with:
+            #   "fatal: could not read Username ... No such device or address"
+            await asyncio.create_subprocess_exec(
+                "git",
+                "config",
+                "--global",
+                "credential.helper",
+                "!f() { echo username=x; echo password=x; }; f",
+                cwd=self.repo_path,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+
             # Fetch latest changes
             result = await asyncio.create_subprocess_exec(
                 "git",
