@@ -48,7 +48,11 @@ const app = express();
 // JSON body parser — skip proxy paths (they use their own raw body parsers
 // to support streaming passthrough; express.json() would consume the body stream).
 app.use((req, res, next) => {
-  if (req.path.startsWith("/llm-proxy/") || req.path.startsWith("/github-api-proxy/")) return next();
+  if (
+    req.path.startsWith("/llm-proxy/") ||
+    req.path.startsWith("/github-api-proxy/") ||
+    req.path.startsWith("/git-proxy/")
+  ) return next();
   express.json({ limit: "10mb" })(req, res, next);
 });
 
